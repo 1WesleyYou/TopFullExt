@@ -145,7 +145,7 @@ repo_dir="${1:?repo_dir required}"
 cd "${repo_dir}"
 ./setup.sh master
 join_cmd="$(sudo kubeadm token create --print-join-command)"
-echo "__JOIN_CMD__=${join_cmd} --cri-socket unix://var/run/cri-dockerd.sock"
+echo "__JOIN_CMD__=${join_cmd}"
 REMOTE
 }
 

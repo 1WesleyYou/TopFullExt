@@ -216,7 +216,7 @@ setup_master_cluster() {
   log "Master setup done. Use this join command on worker:"
   local join_cmd
   join_cmd="$(sudo kubeadm token create --print-join-command)"
-  echo "${join_cmd} --cri-socket ${CRI_SOCKET}"
+  echo "${join_cmd}"
 }
 
 join_worker_cluster() {
@@ -231,13 +231,28 @@ join_worker_cluster() {
     exit 1
   fi
 
-  local cmd="${JOIN_CMD_RAW#sudo }"
-  if [[ "${cmd}" != *"--cri-socket"* ]]; then
-    cmd="${cmd} --cri-socket ${CRI_SOCKET}"
-  fi
+  local cmd cmd_without_cri output status
+  cmd="${JOIN_CMD_RAW#sudo }"
+  cmd_without_cri="$(printf "%s" "${cmd}" | sed -E 's/[[:space:]]--cri-socket[[:space:]]+[^[:space:]]+//g')"
 
   log "Joining worker to cluster"
-  sudo bash -lc "${cmd}"
+  set +e
+  output="$(sudo bash -lc "${cmd}" 2>&1)"
+  status=$?
+  set -e
+  printf "%s\n" "${output}"
+
+  if [[ "${status}" -eq 0 ]]; then
+    return
+  fi
+
+  if [[ "${output}" == *"unknown flag: --cri-socket"* && "${cmd_without_cri}" != "${cmd}" ]]; then
+    log "Detected kubeadm without --cri-socket support, retry join without it"
+    sudo bash -lc "${cmd_without_cri}"
+    return
+  fi
+
+  return "${status}"
 }
 
 main() {
