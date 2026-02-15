@@ -22,7 +22,8 @@ JOIN_CMD_RAW="${2:-${KUBEADM_JOIN_CMD:-}}"
 
 PROJECT_ROOT="${PROJECT_ROOT:-${HOME}/TopFullExt}"
 MASTER_IP="${MASTER_IP:-}"
-K8S_VERSION_MINOR="${K8S_VERSION_MINOR:-v1.26}"
+K8S_VERSION_MINOR="${K8S_VERSION_MINOR:-v1.28}"
+K8S_APT_REPO_MINOR="${K8S_APT_REPO_MINOR:-}"
 CRI_SOCKET="unix://var/run/cri-dockerd.sock"
 
 log() {
@@ -104,12 +105,35 @@ EOF
 
 install_k8s_packages() {
   log "Installing kubelet/kubeadm/kubectl"
+
+  # v1.26/v1.27 apt channel publishes an expired key in 2026.
+  local repo_minor="${K8S_APT_REPO_MINOR:-${K8S_VERSION_MINOR}}"
+  case "${repo_minor}" in
+    v1.26|v1.27)
+      log "Kubernetes apt repo ${repo_minor} has expired key, fallback to v1.28"
+      repo_minor="v1.28"
+      ;;
+  esac
+
+  # Remove stale Kubernetes apt entries from all apt source files.
+  sudo bash -lc 'shopt -s nullglob; for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list; do [[ -f "$f" ]] || continue; sed -i -E "/pkgs\.k8s\.io|apt\.kubernetes\.io/d" "$f"; done'
+  sudo rm -f /etc/apt/sources.list.d/kubernetes.list
+  sudo rm -f /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+
+  # Clean stale cached indexes for old Kubernetes repo signatures.
+  sudo bash -lc 'rm -f /var/lib/apt/lists/*pkgs.k8s.io* /var/lib/apt/lists/*kubernetes* || true'
+
   sudo apt-get update
   sudo apt-get install -y apt-transport-https ca-certificates curl gpg
   sudo mkdir -p /etc/apt/keyrings
-  curl -fsSL "https://pkgs.k8s.io/core:/stable:/${K8S_VERSION_MINOR}/deb/Release.key" | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
-  echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/${K8S_VERSION_MINOR}/deb/ /" | sudo tee /etc/apt/sources.list.d/kubernetes.list >/dev/null
-  sudo apt-get update
+  curl -fsSL "https://pkgs.k8s.io/core:/stable:/${repo_minor}/deb/Release.key" | gpg --dearmor | sudo tee /etc/apt/keyrings/kubernetes-apt-keyring.gpg >/dev/null
+  echo "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/${repo_minor}/deb/ /" | sudo tee /etc/apt/sources.list.d/kubernetes.list >/dev/null
+  if ! sudo apt-get update; then
+    log "apt update failed once, refreshing Kubernetes apt key and retrying"
+    sudo rm -f /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+    curl -fsSL "https://pkgs.k8s.io/core:/stable:/${repo_minor}/deb/Release.key" | gpg --dearmor | sudo tee /etc/apt/keyrings/kubernetes-apt-keyring.gpg >/dev/null
+    sudo apt-get update
+  fi
   sudo apt-get install -y kubelet kubeadm kubectl
   sudo apt-mark hold kubelet kubeadm kubectl
 }
