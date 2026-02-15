@@ -30,6 +30,24 @@ log() {
   printf "\n[%s] %s\n" "$(date +'%F %T')" "$*"
 }
 
+kubectl_admin() {
+  sudo KUBECONFIG=/etc/kubernetes/admin.conf kubectl "$@"
+}
+
+wait_for_apiserver() {
+  local retries="${1:-30}"
+  local sleep_seconds="${2:-2}"
+  local i
+
+  for ((i = 1; i <= retries; i++)); do
+    if kubectl_admin get --raw=/readyz >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep "${sleep_seconds}"
+  done
+  return 1
+}
+
 require_role() {
   if [[ -z "${ROLE}" ]]; then
     echo "Usage: $0 master|worker [join_command_for_worker]"
@@ -153,6 +171,16 @@ setup_master_cluster() {
     "${init_cmd[@]}"
   else
     log "Detected existing /etc/kubernetes/admin.conf, skip kubeadm init"
+    # Existing admin.conf does not guarantee API server is healthy.
+    sudo systemctl restart kubelet || true
+  fi
+
+  if ! wait_for_apiserver 45 2; then
+    echo "Control-plane API server is not reachable at https://${MASTER_IP:-127.0.0.1}:6443"
+    echo "If this node is in a broken previous state, run:"
+    echo "  sudo kubeadm reset -f"
+    echo "Then rerun setup."
+    exit 1
   fi
 
   local target_user target_group target_home
@@ -163,14 +191,14 @@ setup_master_cluster() {
   sudo cp -f /etc/kubernetes/admin.conf "${target_home}/.kube/config"
   sudo chown "${target_user}:${target_group}" "${target_home}/.kube/config"
 
-  export KUBECONFIG=/etc/kubernetes/admin.conf
+  export KUBECONFIG="${target_home}/.kube/config"
 
   local calico_path="${PROJECT_ROOT}/TopFull_master/calico.yaml"
   local cadvisor_dir="${PROJECT_ROOT}/TopFull_master/online_boutique_scripts/cadvisor"
 
   if [[ -f "${calico_path}" ]]; then
     log "Applying Calico CNI"
-    kubectl apply -f "${calico_path}"
+    kubectl_admin apply -f "${calico_path}"
   else
     log "WARNING: calico file not found at ${calico_path}"
   fi
@@ -179,7 +207,7 @@ setup_master_cluster() {
     log "Installing cAdvisor"
     (
       cd "${cadvisor_dir}"
-      kubectl kustomize deploy/kubernetes/base | kubectl apply -f -
+      kubectl_admin kustomize deploy/kubernetes/base | kubectl_admin apply -f -
     )
   else
     log "WARNING: cadvisor directory not found at ${cadvisor_dir}"
