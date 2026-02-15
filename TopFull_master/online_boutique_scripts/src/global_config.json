@@ -1,13 +1,13 @@
 {
-    "checkpoint_path": "/home/topfull-master/TopFull/TopFull_master/online_boutique_scripts/src/checkpoint_000701",
+    "checkpoint_path": "$HOME/TopFullExt/TopFull_master/online_boutique_scripts/src/checkpoint_000701",
     "microservice_code": "online_boutique",
-    "proxy_dir": "/home/topfull-master/TopFull/TopFull_master/online_boutique_scripts/src/proxy/rate_config/",
-    "microservice_configuration": "/home/topfull-master/TopFull/TopFull_master/online_boutique_scripts/src/config/online_boutique.json",
-    "proxy_url": "http://10.8.0.22:8090",
-    "locust_url": "http://10.8.0.23",
+    "proxy_dir": "$HOME/TopFullExt/TopFull_master/online_boutique_scripts/src/proxy/rate_config/",
+    "microservice_configuration": "$HOME/TopFullExt/TopFull_master/online_boutique_scripts/src/config/online_boutique.json",
+    "proxy_url": "http://10.10.1.1:8090",
+    "locust_url": "http://10.10.1.3",
     "locust_port": 43,
     "record_target": ["getcart", "getproduct", "postcheckout", "postcart", "emptycart"],
-    "record_path": "/home/topfull-master/TopFull/TopFull_master/online_boutique_scripts/src/logs/",
-    "num_instance_path": "/home/topfull-master/TopFull/TopFull_master/online_boutique_scripts/src/logs/num_instances.csv",
-    "frontend_url": "10.8.0.22:30440"
+    "record_path": "$HOME/TopFullExt/TopFull_master/online_boutique_scripts/src/logs/",
+    "num_instance_path": "$HOME/TopFullExt/TopFull_master/online_boutique_scripts/src/logs/num_instances.csv",
+    "frontend_url": "10.10.1.1:30440"
 }

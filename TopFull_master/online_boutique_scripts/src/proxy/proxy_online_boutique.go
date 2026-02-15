@@ -25,7 +25,7 @@ var (
 	limiter = rate.NewLimiter(70, 70)
 	limitDir string
 	limiterTable = make(map[string]*rate.Limiter)
-	global_config_path = "/home/topfull-master/TopFull/TopFull_master/online_boutique_scripts/src/global_config.json"
+	global_config_path = os.ExpandEnv("$HOME/TopFullExt/TopFull_master/online_boutique_scripts/src/global_config.json")
 	global_config Config
 	mapStats = make(map[string]*StatsModule)
 	globalLock *sync.Mutex
@@ -100,6 +100,7 @@ func init() {
 		fmt.Println(err)
 	}
 	json.Unmarshal(b, &global_config)
+	global_config.ProxyDir = os.ExpandEnv(global_config.ProxyDir)
 
 	limitDir = global_config.ProxyDir
 

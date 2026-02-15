@@ -6,10 +6,15 @@ import json
 import subprocess
 import random
 import threading
+import os
 
-global_config_path = "/home/topfull-master/TopFull/TopFull_master/online_boutique_scripts/src/global_config.json"
+global_config_path = os.path.expanduser("~/TopFullExt/TopFull_master/online_boutique_scripts/src/global_config.json")
 with open(global_config_path, "r") as f:
     global_config = json.load(f)
+global_config = {
+    k: os.path.expandvars(os.path.expanduser(v)) if isinstance(v, str) else v
+    for k, v in global_config.items()
+}
 
 
 """
