@@ -18,6 +18,8 @@ set -euo pipefail
 #   REPO_URL                    (default: local git origin URL)
 #   BRANCH                      (default: current local branch)
 #   SKIP_LOADGEN_PREP=1         (skip preparing loadgen node)
+#   RUN_TOPFULL_DEPLOY=1        (also deploy app + start TopFull stack)
+#   CONTROLLER_MODE=mimd|rl|without_cluster  (default: mimd)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="${SCRIPT_DIR}/.env"
@@ -36,6 +38,8 @@ REMOTE_REPO_DIR="${REMOTE_REPO_DIR:-}"
 REPO_URL="${REPO_URL:-$(git -C "${SCRIPT_DIR}" remote get-url origin)}"
 BRANCH="${BRANCH:-$(git -C "${SCRIPT_DIR}" rev-parse --abbrev-ref HEAD)}"
 SKIP_LOADGEN_PREP="${SKIP_LOADGEN_PREP:-0}"
+RUN_TOPFULL_DEPLOY="${RUN_TOPFULL_DEPLOY:-0}"
+CONTROLLER_MODE="${CONTROLLER_MODE:-mimd}"
 
 log() {
   printf "\n[%s] %s\n" "$(date +'%F %T')" "$*"
@@ -134,6 +138,100 @@ push_setup_scripts_to_node() {
   ssh "${target}" "chmod +x \"${repo_dir}/setup.sh\" \"${repo_dir}/setup_master.sh\" \"${repo_dir}/setup_worker.sh\" || true"
 }
 
+push_file_list_to_node() {
+  local target="$1"
+  local repo_dir="$2"
+  shift 2
+  local rel src dst_dir
+
+  for rel in "$@"; do
+    src="${SCRIPT_DIR}/${rel}"
+    if [[ ! -f "${src}" ]]; then
+      continue
+    fi
+    dst_dir="$(dirname "${repo_dir}/${rel}")"
+    ssh "${target}" "mkdir -p \"${dst_dir}\""
+    scp "${src}" "${target}:${repo_dir}/${rel}"
+  done
+}
+
+deploy_topfull_master() {
+  local target="$1"
+  local repo_dir="$2"
+  local controller_script
+
+  case "${CONTROLLER_MODE}" in
+    rl) controller_script="deploy_rl.py" ;;
+    without_cluster) controller_script="deploy_without_cluster.py" ;;
+    *) controller_script="deploy_mimd.py" ;;
+  esac
+
+  log "Deploying TopFull stack on ${target} (controller: ${controller_script})"
+  ssh "${target}" bash -s -- "${repo_dir}" "${controller_script}" <<'REMOTE'
+set -euo pipefail
+repo_dir="${1:?repo_dir required}"
+controller_script="${2:?controller_script required}"
+src_dir="${repo_dir}/TopFull_master/online_boutique_scripts/src"
+
+if ! command -v pip3 >/dev/null 2>&1; then
+  sudo apt-get update
+  sudo apt-get install -y python3-pip
+fi
+if ! command -v tmux >/dev/null 2>&1; then
+  sudo apt-get update
+  sudo apt-get install -y tmux
+fi
+
+cd "${repo_dir}/TopFull_master"
+pip3 install -r requirements.txt
+
+kubectl apply -f "${repo_dir}/TopFull_master/online_boutique_scripts/deployments/online_boutique_original_custom.yaml"
+kubectl apply -f "${repo_dir}/TopFull_master/online_boutique_scripts/deployments/metric-server-latest.yaml"
+python3 "${src_dir}/instance_scaling.py"
+
+tmux kill-session -t topfull-proxy >/dev/null 2>&1 || true
+tmux kill-session -t topfull-controller >/dev/null 2>&1 || true
+tmux kill-session -t topfull-metrics >/dev/null 2>&1 || true
+
+tmux new-session -d -s topfull-proxy "cd '${src_dir}/proxy' && go run proxy_online_boutique.go"
+tmux new-session -d -s topfull-controller "cd '${src_dir}' && python3 ${controller_script}"
+tmux new-session -d -s topfull-metrics "cd '${src_dir}' && python3 metric_collector.py"
+REMOTE
+}
+
+deploy_topfull_loadgen() {
+  local target="$1"
+  local repo_dir="$2"
+  local master_ip="$3"
+
+  log "Deploying loadgen on ${target}"
+  ssh "${target}" bash -s -- "${repo_dir}" "${master_ip}" <<'REMOTE'
+set -euo pipefail
+repo_dir="${1:?repo_dir required}"
+master_ip="${2:?master_ip required}"
+loadgen_dir="${repo_dir}/TopFull_loadgen"
+
+if ! command -v pip3 >/dev/null 2>&1; then
+  sudo apt-get update
+  sudo apt-get install -y python3-pip
+fi
+if ! command -v tmux >/dev/null 2>&1; then
+  sudo apt-get update
+  sudo apt-get install -y tmux
+fi
+
+cd "${loadgen_dir}"
+pip3 install -r requirements.txt
+
+sed -i -E "s|--host=http://[0-9.]+:30440|--host=http://${master_ip}:30440|g" online_boutique_create.sh online_boutique_create2.sh
+sed -i -E "s|http://[0-9.]+:8090|http://${master_ip}:8090|g" locust_online_boutique.py
+chmod +x online_boutique_create.sh online_boutique_create2.sh
+
+tmux kill-session -t topfull-loadgen >/dev/null 2>&1 || true
+tmux new-session -d -s topfull-loadgen "cd '${loadgen_dir}' && ./online_boutique_create.sh"
+REMOTE
+}
+
 run_setup_master() {
   local target="$1"
   local repo_dir="$2"
@@ -171,10 +269,12 @@ main() {
   local master_target worker_target loadgen_target
   local master_repo_dir worker_repo_dir loadgen_repo_dir
   local master_log join_cmd
+  local master_ip_for_deploy
 
   master_target="$(target_host "${MASTER_HOST}")"
   worker_target="$(target_host "${WORKER_HOST}")"
   loadgen_target="$(target_host "${LOADGEN_HOST}")"
+  master_ip_for_deploy="${MASTER_IP:-}"
   master_log="$(mktemp)"
   trap "rm -f '${master_log}'" EXIT
 
@@ -216,6 +316,37 @@ main() {
   run_setup_worker "${worker_target}" "${worker_repo_dir}" "${join_cmd}"
 
   log "Done. Cluster bootstrap flow completed."
+
+  if [[ "${RUN_TOPFULL_DEPLOY}" == "1" ]]; then
+    if [[ -z "${master_ip_for_deploy}" ]]; then
+      echo "MASTER_IP is empty. Set it in .env for loadgen host/proxy rewrite."
+      exit 1
+    fi
+
+    log "Step 3/3: push runtime files + deploy TopFull"
+    push_file_list_to_node "${master_target}" "${master_repo_dir}" \
+      "TopFull_master/online_boutique_scripts/src/global_config.json" \
+      "TopFull_master/online_boutique_scripts/src/deploy_rl.py" \
+      "TopFull_master/online_boutique_scripts/src/deploy_mimd.py" \
+      "TopFull_master/online_boutique_scripts/src/deploy_without_cluster.py" \
+      "TopFull_master/online_boutique_scripts/src/metric_collector.py" \
+      "TopFull_master/online_boutique_scripts/src/overload_detection.py" \
+      "TopFull_master/online_boutique_scripts/src/proxy/proxy_online_boutique.go" \
+      "TopFull_master/online_boutique_scripts/src/proxy/proxy_train_ticket.go"
+
+    push_file_list_to_node "${loadgen_target}" "${loadgen_repo_dir}" \
+      "TopFull_loadgen/online_boutique_create.sh" \
+      "TopFull_loadgen/online_boutique_create2.sh" \
+      "TopFull_loadgen/locust_online_boutique.py"
+
+    deploy_topfull_master "${master_target}" "${master_repo_dir}"
+
+    if [[ "${SKIP_LOADGEN_PREP}" != "1" ]]; then
+      deploy_topfull_loadgen "${loadgen_target}" "${loadgen_repo_dir}" "${master_ip_for_deploy}"
+    fi
+
+    log "TopFull deploy started. Check tmux sessions: topfull-proxy, topfull-controller, topfull-metrics, topfull-loadgen"
+  fi
 }
 
 main "$@"
