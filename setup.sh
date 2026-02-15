@@ -155,12 +155,13 @@ setup_master_cluster() {
     log "Detected existing /etc/kubernetes/admin.conf, skip kubeadm init"
   fi
 
-  local target_user target_home
+  local target_user target_group target_home
   target_user="${SUDO_USER:-$USER}"
+  target_group="$(id -gn "${target_user}")"
   target_home="$(getent passwd "${target_user}" | cut -d: -f6)"
   mkdir -p "${target_home}/.kube"
   sudo cp -f /etc/kubernetes/admin.conf "${target_home}/.kube/config"
-  sudo chown "${target_user}:${target_user}" "${target_home}/.kube/config"
+  sudo chown "${target_user}:${target_group}" "${target_home}/.kube/config"
 
   export KUBECONFIG=/etc/kubernetes/admin.conf
 
