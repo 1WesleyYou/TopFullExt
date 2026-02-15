@@ -153,11 +153,15 @@ run_setup_worker() {
   local target="$1"
   local repo_dir="$2"
   local join_cmd="$3"
+  local join_cmd_b64
 
-  ssh "${target}" bash -s -- "${repo_dir}" "${join_cmd}" <<'REMOTE'
+  join_cmd_b64="$(printf "%s" "${join_cmd}" | base64 -w0)"
+
+  ssh "${target}" bash -s -- "${repo_dir}" "${join_cmd_b64}" <<'REMOTE'
 set -euo pipefail
 repo_dir="${1:?repo_dir required}"
-join_cmd="${2:?join_cmd required}"
+join_cmd_b64="${2:?join_cmd_b64 required}"
+join_cmd="$(printf "%s" "${join_cmd_b64}" | base64 -d)"
 cd "${repo_dir}"
 ./setup.sh worker "${join_cmd}"
 REMOTE
@@ -172,7 +176,7 @@ main() {
   worker_target="$(target_host "${WORKER_HOST}")"
   loadgen_target="$(target_host "${LOADGEN_HOST}")"
   master_log="$(mktemp)"
-  trap 'rm -f "${master_log}"' EXIT
+  trap "rm -f '${master_log}'" EXIT
 
   log "Coordinating setup via SSH"
   log "Master: ${master_target}, Worker: ${worker_target}, Loadgen: ${loadgen_target}"

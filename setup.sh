@@ -231,8 +231,17 @@ join_worker_cluster() {
     exit 1
   fi
 
-  local cmd cmd_without_cri output status
+  local cmd cmd_with_cri cmd_without_cri output status
   cmd="${JOIN_CMD_RAW#sudo }"
+  if [[ "${cmd}" != kubeadm\ join* ]]; then
+    echo "Invalid join command: expected 'kubeadm join ...'"
+    echo "Received: ${cmd}"
+    exit 1
+  fi
+  cmd_with_cri="${cmd}"
+  if [[ "${cmd}" != *"--cri-socket"* ]]; then
+    cmd_with_cri="${cmd} --cri-socket ${CRI_SOCKET}"
+  fi
   cmd_without_cri="$(printf "%s" "${cmd}" | sed -E 's/[[:space:]]--cri-socket[[:space:]]+[^[:space:]]+//g')"
 
   log "Joining worker to cluster"
@@ -246,7 +255,19 @@ join_worker_cluster() {
     return
   fi
 
-  if [[ "${output}" == *"unknown flag: --cri-socket"* && "${cmd_without_cri}" != "${cmd}" ]]; then
+  if [[ "${output}" == *"Found multiple CRI endpoints"* && "${cmd_with_cri}" != "${cmd}" ]]; then
+    log "Detected multiple CRI endpoints, retry join with --cri-socket ${CRI_SOCKET}"
+    set +e
+    output="$(sudo bash -lc "${cmd_with_cri}" 2>&1)"
+    status=$?
+    set -e
+    printf "%s\n" "${output}"
+    if [[ "${status}" -eq 0 ]]; then
+      return
+    fi
+  fi
+
+  if [[ "${output}" == *"unknown flag: --cri-socket"* && "${cmd_without_cri}" != "${cmd_with_cri}" ]]; then
     log "Detected kubeadm without --cri-socket support, retry join without it"
     sudo bash -lc "${cmd_without_cri}"
     return
