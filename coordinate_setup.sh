@@ -190,7 +190,7 @@ python3 -m pip install --user \
   kubernetes \
   watchdog \
   redis \
-  numpy \
+  "numpy<2" \
   "gym==0.23.1" \
   "ray[rllib]==2.0.0"
 
