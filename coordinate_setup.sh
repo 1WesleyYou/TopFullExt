@@ -18,7 +18,7 @@ set -euo pipefail
 #   REPO_URL                    (default: local git origin URL)
 #   BRANCH                      (default: current local branch)
 #   SKIP_LOADGEN_PREP=1         (skip preparing loadgen node)
-#   RUN_TOPFULL_DEPLOY=1        (also deploy app + start TopFull stack)
+#   MASTER_IP                   (optional; if empty, auto-detect from master node)
 #   CONTROLLER_MODE=mimd|rl|without_cluster  (default: mimd)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -38,7 +38,6 @@ REMOTE_REPO_DIR="${REMOTE_REPO_DIR:-}"
 REPO_URL="${REPO_URL:-$(git -C "${SCRIPT_DIR}" remote get-url origin)}"
 BRANCH="${BRANCH:-$(git -C "${SCRIPT_DIR}" rev-parse --abbrev-ref HEAD)}"
 SKIP_LOADGEN_PREP="${SKIP_LOADGEN_PREP:-0}"
-RUN_TOPFULL_DEPLOY="${RUN_TOPFULL_DEPLOY:-0}"
 CONTROLLER_MODE="${CONTROLLER_MODE:-mimd}"
 
 log() {
@@ -183,7 +182,17 @@ if ! command -v tmux >/dev/null 2>&1; then
 fi
 
 cd "${repo_dir}/TopFull_master"
-pip3 install -r requirements.txt
+# The bundled requirements file includes Ubuntu apt packages (e.g. language-selector),
+# which are not available on PyPI. Install only runtime-critical Python deps here.
+python3 -m pip install --user --upgrade pip
+python3 -m pip install --user \
+  requests \
+  kubernetes \
+  watchdog \
+  redis \
+  numpy \
+  "gym==0.23.1" \
+  "ray[rllib]==2.0.0"
 
 kubectl apply -f "${repo_dir}/TopFull_master/online_boutique_scripts/deployments/online_boutique_original_custom.yaml"
 kubectl apply -f "${repo_dir}/TopFull_master/online_boutique_scripts/deployments/metric-server-latest.yaml"
@@ -221,14 +230,17 @@ if ! command -v tmux >/dev/null 2>&1; then
 fi
 
 cd "${loadgen_dir}"
-pip3 install -r requirements.txt
+# The bundled requirements file contains OS packages that pip cannot resolve.
+# Install only the load generation runtime deps.
+python3 -m pip install --user --upgrade pip
+python3 -m pip install --user "locust==2.8.6"
 
 sed -i -E "s|--host=http://[0-9.]+:30440|--host=http://${master_ip}:30440|g" online_boutique_create.sh online_boutique_create2.sh
 sed -i -E "s|http://[0-9.]+:8090|http://${master_ip}:8090|g" locust_online_boutique.py
 chmod +x online_boutique_create.sh online_boutique_create2.sh
 
 tmux kill-session -t topfull-loadgen >/dev/null 2>&1 || true
-tmux new-session -d -s topfull-loadgen "cd '${loadgen_dir}' && ./online_boutique_create.sh"
+tmux new-session -d -s topfull-loadgen "export PATH=\$HOME/.local/bin:\$PATH && cd '${loadgen_dir}' && ./online_boutique_create.sh"
 REMOTE
 }
 
@@ -265,6 +277,19 @@ cd "${repo_dir}"
 REMOTE
 }
 
+detect_master_ip() {
+  local target="$1"
+  local ip="${MASTER_IP:-}"
+
+  if [[ -n "${ip}" ]]; then
+    printf "%s" "${ip}"
+    return
+  fi
+
+  ip="$(ssh "${target}" "hostname -I | awk '{print \$1}'" | tr -d '[:space:]')"
+  printf "%s" "${ip}"
+}
+
 main() {
   local master_target worker_target loadgen_target
   local master_repo_dir worker_repo_dir loadgen_repo_dir
@@ -274,7 +299,7 @@ main() {
   master_target="$(target_host "${MASTER_HOST}")"
   worker_target="$(target_host "${WORKER_HOST}")"
   loadgen_target="$(target_host "${LOADGEN_HOST}")"
-  master_ip_for_deploy="${MASTER_IP:-}"
+  master_ip_for_deploy=""
   master_log="$(mktemp)"
   trap "rm -f '${master_log}'" EXIT
 
@@ -286,7 +311,7 @@ main() {
   worker_repo_dir="$(resolve_remote_repo_dir "${worker_target}")"
   loadgen_repo_dir="$(resolve_remote_repo_dir "${loadgen_target}")"
 
-  log "Step 0/2: prepare repo + .env on nodes"
+  log "Step 0/3: prepare repo + .env on nodes"
   ensure_repo_on_node "${master_target}" "${master_repo_dir}"
   push_env_to_node "${master_target}" "${master_repo_dir}"
   push_setup_scripts_to_node "${master_target}" "${master_repo_dir}"
@@ -303,7 +328,7 @@ main() {
     log "SKIP_LOADGEN_PREP=1, skip loadgen preparation"
   fi
 
-  log "Step 1/2: setup master on ${master_target}"
+  log "Step 1/3: setup master on ${master_target}"
   run_setup_master "${master_target}" "${master_repo_dir}" "${master_log}"
 
   join_cmd="$(sed -n 's/^__JOIN_CMD__=//p' "${master_log}" | tail -n 1)"
@@ -312,40 +337,44 @@ main() {
     exit 1
   fi
 
-  log "Step 2/2: setup worker on ${worker_target}"
+  log "Step 2/3: setup worker on ${worker_target}"
   run_setup_worker "${worker_target}" "${worker_repo_dir}" "${join_cmd}"
 
   log "Done. Cluster bootstrap flow completed."
 
-  if [[ "${RUN_TOPFULL_DEPLOY}" == "1" ]]; then
-    if [[ -z "${master_ip_for_deploy}" ]]; then
-      echo "MASTER_IP is empty. Set it in .env for loadgen host/proxy rewrite."
-      exit 1
-    fi
+  master_ip_for_deploy="$(detect_master_ip "${master_target}")"
+  if [[ -z "${master_ip_for_deploy}" ]]; then
+    echo "Failed to detect MASTER_IP from ${master_target}."
+    echo "Set MASTER_IP in .env and rerun."
+    exit 1
+  fi
+  log "Using master IP for deploy: ${master_ip_for_deploy}"
 
-    log "Step 3/3: push runtime files + deploy TopFull"
-    push_file_list_to_node "${master_target}" "${master_repo_dir}" \
-      "TopFull_master/online_boutique_scripts/src/global_config.json" \
-      "TopFull_master/online_boutique_scripts/src/deploy_rl.py" \
-      "TopFull_master/online_boutique_scripts/src/deploy_mimd.py" \
-      "TopFull_master/online_boutique_scripts/src/deploy_without_cluster.py" \
-      "TopFull_master/online_boutique_scripts/src/metric_collector.py" \
-      "TopFull_master/online_boutique_scripts/src/overload_detection.py" \
-      "TopFull_master/online_boutique_scripts/src/proxy/proxy_online_boutique.go" \
-      "TopFull_master/online_boutique_scripts/src/proxy/proxy_train_ticket.go"
+  log "Step 3/3: push runtime files + deploy TopFull"
+  push_file_list_to_node "${master_target}" "${master_repo_dir}" \
+    "TopFull_master/online_boutique_scripts/src/global_config.json" \
+    "TopFull_master/online_boutique_scripts/src/deploy_rl.py" \
+    "TopFull_master/online_boutique_scripts/src/deploy_mimd.py" \
+    "TopFull_master/online_boutique_scripts/src/deploy_without_cluster.py" \
+    "TopFull_master/online_boutique_scripts/src/metric_collector.py" \
+    "TopFull_master/online_boutique_scripts/src/overload_detection.py" \
+    "TopFull_master/online_boutique_scripts/src/proxy/proxy_online_boutique.go" \
+    "TopFull_master/online_boutique_scripts/src/proxy/proxy_train_ticket.go"
 
+  if [[ "${SKIP_LOADGEN_PREP}" != "1" ]]; then
     push_file_list_to_node "${loadgen_target}" "${loadgen_repo_dir}" \
       "TopFull_loadgen/online_boutique_create.sh" \
       "TopFull_loadgen/online_boutique_create2.sh" \
       "TopFull_loadgen/locust_online_boutique.py"
+  fi
 
-    deploy_topfull_master "${master_target}" "${master_repo_dir}"
+  deploy_topfull_master "${master_target}" "${master_repo_dir}"
 
-    if [[ "${SKIP_LOADGEN_PREP}" != "1" ]]; then
-      deploy_topfull_loadgen "${loadgen_target}" "${loadgen_repo_dir}" "${master_ip_for_deploy}"
-    fi
-
+  if [[ "${SKIP_LOADGEN_PREP}" != "1" ]]; then
+    deploy_topfull_loadgen "${loadgen_target}" "${loadgen_repo_dir}" "${master_ip_for_deploy}"
     log "TopFull deploy started. Check tmux sessions: topfull-proxy, topfull-controller, topfull-metrics, topfull-loadgen"
+  else
+    log "TopFull deploy started on master (loadgen skipped by SKIP_LOADGEN_PREP=1). Check tmux: topfull-proxy, topfull-controller, topfull-metrics"
   fi
 }
 
