@@ -182,7 +182,11 @@ def record_online_boutique():
 
         for i, api in enumerate(apis):
             # rps, fail, latency95, latency99 = metric[api]
-            rps, fail, latency95 = metric[api]
+            if api not in metric:
+                # Loadgen endpoints may not be fully up yet; keep collector alive.
+                rps, fail, latency95 = 0.0, 0.0, 0.0
+            else:
+                rps, fail, latency95 = metric[api]
             latency99 = 0
             total_rps += rps
             total_fail += fail

@@ -22,14 +22,34 @@ target_host() {
 
 LOADGEN_TARGET="$(target_host "${LOADGEN_NODE:-node2}")"
 PROJECT_NAME="${PROJECT_NAME:-TopFullExt}"
+MASTER_IP_VALUE="${MASTER_IP:-}"
 
-ssh "${LOADGEN_TARGET}" bash -s -- "${PROJECT_NAME}" <<'REMOTE'
+if [[ -z "${MASTER_IP_VALUE}" ]]; then
+  if [[ -n "${SSH_USER:-}" ]]; then
+    MASTER_TARGET="${SSH_USER}@${MASTER_NODE:-node0}"
+  else
+    MASTER_TARGET="${MASTER_NODE:-node0}"
+  fi
+  MASTER_IP_VALUE="$(ssh "${MASTER_TARGET}" "hostname -I | awk '{print \$1}'" | tr -d '[:space:]')"
+fi
+
+ssh "${LOADGEN_TARGET}" bash -s -- "${PROJECT_NAME}" "${MASTER_IP_VALUE}" <<'REMOTE'
 set -euo pipefail
 project_name="${1:-TopFullExt}"
+master_ip="${2:?master_ip required}"
 loadgen_dir="${HOME}/${project_name}/TopFull_loadgen"
 
 cd "${loadgen_dir}"
+ulimit -n 65535 || true
+export PATH="${HOME}/.local/bin:${PATH}"
+if ! command -v locust >/dev/null 2>&1; then
+  python3 -m pip install --user "locust==2.8.6"
+fi
+# Rewrite target frontend/proxy endpoint before every run.
+sed -i -E "s|--host=http://[0-9.]+:30440|--host=http://${master_ip}:30440|g" online_boutique_create.sh online_boutique_create2.sh
+sed -i -E "s|http://[0-9.]+:8090|http://${master_ip}:8090|g" locust_online_boutique.py
 bash ./online_boutique_create.sh
 tmux ls 2>/dev/null | egrep 'session1|session2|session3' || true
+pgrep -af locust >/dev/null || { echo "locust did not start"; exit 1; }
 REMOTE
 
