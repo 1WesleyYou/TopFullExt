@@ -185,6 +185,7 @@ cd "${repo_dir}/TopFull_master"
 # The bundled requirements file includes Ubuntu apt packages (e.g. language-selector),
 # which are not available on PyPI. Install only runtime-critical Python deps here.
 python3 -m pip install --user --upgrade pip
+# Default install for all controller modes (MIMD still uses PPO/checkpoint with TensorFlow backend).
 python3 -m pip install --user \
   requests \
   kubernetes \
@@ -196,14 +197,10 @@ python3 -m pip install --user \
   "scikit-image==0.19.3" \
   "gym==0.23.1" \
   "ray==2.0.0" \
-  "dm-tree==0.1.7"
-if [[ "${controller_script}" != "deploy_mimd.py" ]]; then
-  # RL mode (deploy_rl.py / deploy_without_cluster.py) requires TensorFlow extras.
-  python3 -m pip install --user \
-    "tensorflow==2.10.1" \
-    "tensorboard==2.10.1" \
-    "grpcio==1.43.0"
-fi
+  "dm-tree==0.1.7" \
+  "tensorflow==2.10.1" \
+  "tensorboard==2.10.1" \
+  "grpcio==1.43.0"
 
 kubectl apply -f "${repo_dir}/TopFull_master/online_boutique_scripts/deployments/online_boutique_original_custom.yaml"
 kubectl apply -f "${repo_dir}/TopFull_master/online_boutique_scripts/deployments/metric-server-latest.yaml"
