@@ -1,4 +1,4 @@
-.PHONY: help mimd inject inject-base inject-surge observe status
+.PHONY: help mimd inject inject-base inject-surge observe status stop
 
 help:
 	@echo "TopFull quick commands:"
@@ -8,6 +8,7 @@ help:
 	@echo "  make inject-surge - start Figure15 surge load"
 	@echo "  make observe      - show mitigation effect snapshot"
 	@echo "  make status       - show overall runtime status"
+	@echo "  make stop         - stop controller + loadgen (clear all injection)"
 
 mimd:
 	@./run_mimd_stack.sh
@@ -26,3 +27,6 @@ observe:
 
 status:
 	@./check_topfull_status.sh
+
+stop:
+	@./stop_all.sh
