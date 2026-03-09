@@ -453,14 +453,16 @@ def getStats_thread_two(service_name, ipAddrs, port, ret, container_ids):
 
 def getStats_v4_two(port=8080):
     def getcAdvisorIP():
-        # Below number of lines should match the number of kubernetes worker machines (nodes)
-        out1, err, ret = exec_command('kubectl get pod -n cadvisor -ojsonpath=\'{.items[0].status.podIP}\'')
-        out2, err, ret = exec_command('kubectl get pod -n cadvisor -ojsonpath=\'{.items[1].status.podIP}\'')
-        out3, err, ret = exec_command('kubectl get pod -n cadvisor -ojsonpath=\'{.items[2].status.podIP}\'')
-        out4, err, ret = exec_command('kubectl get pod -n cadvisor -ojsonpath=\'{.items[3].status.podIP}\'')
-        out5, err, ret = exec_command('kubectl get pod -n cadvisor -ojsonpath=\'{.items[4].status.podIP}\'')
-
-        return [out1.decode('utf-8'), out2.decode('utf-8'), out3.decode('utf-8'), out4.decode('utf-8'), out5.decode('utf-8')]
+        # Dynamically resolve all cAdvisor pod IPs instead of hardcoding node count.
+        out, err, ret = exec_command(
+            "kubectl get pod -n cadvisor -ojsonpath='{range .items[*]}{.status.podIP}{\"\\n\"}{end}'"
+        )
+        ip_list = []
+        for line in out.decode("utf-8").splitlines():
+            ip = line.strip()
+            if ip:
+                ip_list.append(ip)
+        return ip_list
     
     container_ids = getContainerId3()
 
@@ -510,7 +512,7 @@ def run(event):
 def getStats_v4(port=8080):
     def getcAdvisorIP():
         out1, err, ret = exec_command('kubectl get pod -n cadvisor -ojsonpath=\'{.items[0].status.podIP}\'')
-        return out1.decode('utf-8')
+        return out1.decode('utf-8').strip()
     
     container_ids = getContainerId3()
     ret1 = {}
