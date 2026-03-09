@@ -185,24 +185,21 @@ cd "${repo_dir}/TopFull_master"
 # The bundled requirements file includes Ubuntu apt packages (e.g. language-selector),
 # which are not available on PyPI. Install only runtime-critical Python deps here.
 python3 -m pip install --user --upgrade pip
-if [[ "${controller_script}" == "deploy_mimd.py" ]]; then
-  # MIMD mode does not require RL framework dependencies.
+python3 -m pip install --user \
+  requests \
+  kubernetes \
+  watchdog \
+  redis \
+  "numpy==1.23.5" \
+  "pandas==1.4.3" \
+  "tabulate==0.8.10" \
+  "scikit-image==0.19.3" \
+  "gym==0.23.1" \
+  "ray==2.0.0" \
+  "dm-tree==0.1.7"
+if [[ "${controller_script}" != "deploy_mimd.py" ]]; then
+  # RL mode (deploy_rl.py / deploy_without_cluster.py) requires TensorFlow extras.
   python3 -m pip install --user \
-    requests \
-    kubernetes \
-    watchdog \
-    redis \
-    "numpy==1.23.5"
-else
-  # RL mode (deploy_rl.py / deploy_without_cluster.py) requires Ray + TensorFlow.
-  python3 -m pip install --user \
-    requests \
-    kubernetes \
-    watchdog \
-    redis \
-    "numpy==1.23.5" \
-    "gym==0.23.1" \
-    "ray==2.0.0" \
     "tensorflow==2.10.1" \
     "tensorboard==2.10.1" \
     "grpcio==1.43.0"
