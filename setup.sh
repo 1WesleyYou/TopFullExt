@@ -204,10 +204,10 @@ setup_master_cluster() {
   fi
 
   if [[ -d "${cadvisor_dir}" ]]; then
-    log "Installing cAdvisor"
+    log "Installing cAdvisor (overlay: allow-master, reduced resources for tight clusters)"
     (
       cd "${cadvisor_dir}"
-      kubectl_admin kustomize deploy/kubernetes/base | kubectl_admin apply -f -
+      kubectl_admin kustomize deploy/kubernetes/overlays/allow-master | kubectl_admin apply -f -
     )
   else
     log "WARNING: cadvisor directory not found at ${cadvisor_dir}"

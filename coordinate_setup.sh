@@ -21,12 +21,16 @@ set -euo pipefail
 #   MASTER_IP                   (optional; if empty, auto-detect from master node)
 #   CONTROLLER_MODE=mimd|rl|without_cluster  (default: mimd)
 
+sudo apt update
+sudo apt install -y zip
+pip install matplotlib
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="${SCRIPT_DIR}/.env"
 
 if [[ -f "${ENV_FILE}" ]]; then
-  # shellcheck disable=SC1090
-  source "${ENV_FILE}"
+	# shellcheck disable=SC1090
+	source "${ENV_FILE}"
 fi
 
 MASTER_HOST="${MASTER_NODE:-node0}"
@@ -41,21 +45,21 @@ SKIP_LOADGEN_PREP="${SKIP_LOADGEN_PREP:-0}"
 CONTROLLER_MODE="${CONTROLLER_MODE:-mimd}"
 
 log() {
-  printf "\n[%s] %s\n" "$(date +'%F %T')" "$*"
+	printf "\n[%s] %s\n" "$(date +'%F %T')" "$*"
 }
 
 target_host() {
-  local host="$1"
-  if [[ -n "${SSH_USER}" ]]; then
-    printf "%s@%s" "${SSH_USER}" "${host}"
-  else
-    printf "%s" "${host}"
-  fi
+	local host="$1"
+	if [[ -n "${SSH_USER}" ]]; then
+		printf "%s@%s" "${SSH_USER}" "${host}"
+	else
+		printf "%s" "${host}"
+	fi
 }
 
 resolve_remote_repo_dir() {
-  local target="$1"
-  ssh "${target}" bash -s -- "${PROJECT_NAME}" "${REMOTE_REPO_DIR}" <<'REMOTE'
+	local target="$1"
+	ssh "${target}" bash -s -- "${PROJECT_NAME}" "${REMOTE_REPO_DIR}" <<'REMOTE'
 set -euo pipefail
 project_name="${1:-TopFullExt}"
 remote_repo_dir="${2:-}"
@@ -69,11 +73,11 @@ REMOTE
 }
 
 ensure_repo_on_node() {
-  local target="$1"
-  local repo_dir="$2"
+	local target="$1"
+	local repo_dir="$2"
 
-  log "Preparing repository on ${target}:${repo_dir}"
-  ssh "${target}" bash -s -- "${repo_dir}" "${REPO_URL}" "${BRANCH}" <<'REMOTE'
+	log "Preparing repository on ${target}:${repo_dir}"
+	ssh "${target}" bash -s -- "${repo_dir}" "${REPO_URL}" "${BRANCH}" <<'REMOTE'
 set -euo pipefail
 repo_dir="${1:?repo_dir required}"
 repo_url="${2:?repo_url required}"
@@ -107,66 +111,66 @@ REMOTE
 }
 
 push_env_to_node() {
-  local target="$1"
-  local repo_dir="$2"
+	local target="$1"
+	local repo_dir="$2"
 
-  if [[ ! -f "${ENV_FILE}" ]]; then
-    log "No local .env found, skip env push to ${target}"
-    return
-  fi
+	if [[ ! -f "${ENV_FILE}" ]]; then
+		log "No local .env found, skip env push to ${target}"
+		return
+	fi
 
-  log "Pushing .env to ${target}:${repo_dir}/.env"
-  ssh "${target}" "mkdir -p \"${repo_dir}\""
-  scp "${ENV_FILE}" "${target}:${repo_dir}/.env"
+	log "Pushing .env to ${target}:${repo_dir}/.env"
+	ssh "${target}" "mkdir -p \"${repo_dir}\""
+	scp "${ENV_FILE}" "${target}:${repo_dir}/.env"
 }
 
 push_setup_scripts_to_node() {
-  local target="$1"
-  local repo_dir="$2"
-  local f
+	local target="$1"
+	local repo_dir="$2"
+	local f
 
-  log "Pushing setup scripts to ${target}:${repo_dir}"
-  ssh "${target}" "mkdir -p \"${repo_dir}\""
+	log "Pushing setup scripts to ${target}:${repo_dir}"
+	ssh "${target}" "mkdir -p \"${repo_dir}\""
 
-  for f in setup.sh setup_master.sh setup_worker.sh coordinate_setup.sh; do
-    if [[ -f "${SCRIPT_DIR}/${f}" ]]; then
-      scp "${SCRIPT_DIR}/${f}" "${target}:${repo_dir}/${f}"
-    fi
-  done
+	for f in setup.sh setup_master.sh setup_worker.sh coordinate_setup.sh; do
+		if [[ -f "${SCRIPT_DIR}/${f}" ]]; then
+			scp "${SCRIPT_DIR}/${f}" "${target}:${repo_dir}/${f}"
+		fi
+	done
 
-  ssh "${target}" "chmod +x \"${repo_dir}/setup.sh\" \"${repo_dir}/setup_master.sh\" \"${repo_dir}/setup_worker.sh\" || true"
+	ssh "${target}" "chmod +x \"${repo_dir}/setup.sh\" \"${repo_dir}/setup_master.sh\" \"${repo_dir}/setup_worker.sh\" || true"
 }
 
 push_file_list_to_node() {
-  local target="$1"
-  local repo_dir="$2"
-  shift 2
-  local rel src dst_dir
+	local target="$1"
+	local repo_dir="$2"
+	shift 2
+	local rel src dst_dir
 
-  for rel in "$@"; do
-    src="${SCRIPT_DIR}/${rel}"
-    if [[ ! -f "${src}" ]]; then
-      continue
-    fi
-    dst_dir="$(dirname "${repo_dir}/${rel}")"
-    ssh "${target}" "mkdir -p \"${dst_dir}\""
-    scp "${src}" "${target}:${repo_dir}/${rel}"
-  done
+	for rel in "$@"; do
+		src="${SCRIPT_DIR}/${rel}"
+		if [[ ! -f "${src}" ]]; then
+			continue
+		fi
+		dst_dir="$(dirname "${repo_dir}/${rel}")"
+		ssh "${target}" "mkdir -p \"${dst_dir}\""
+		scp "${src}" "${target}:${repo_dir}/${rel}"
+	done
 }
 
 deploy_topfull_master() {
-  local target="$1"
-  local repo_dir="$2"
-  local controller_script
+	local target="$1"
+	local repo_dir="$2"
+	local controller_script
 
-  case "${CONTROLLER_MODE}" in
-    rl) controller_script="deploy_rl.py" ;;
-    without_cluster) controller_script="deploy_without_cluster.py" ;;
-    *) controller_script="deploy_mimd.py" ;;
-  esac
+	case "${CONTROLLER_MODE}" in
+	rl) controller_script="deploy_rl.py" ;;
+	without_cluster) controller_script="deploy_without_cluster.py" ;;
+	*) controller_script="deploy_mimd.py" ;;
+	esac
 
-  log "Deploying TopFull stack on ${target} (controller: ${controller_script})"
-  ssh "${target}" bash -s -- "${repo_dir}" "${controller_script}" <<'REMOTE'
+	log "Deploying TopFull stack on ${target} (controller: ${controller_script})"
+	ssh "${target}" bash -s -- "${repo_dir}" "${controller_script}" <<'REMOTE'
 set -euo pipefail
 repo_dir="${1:?repo_dir required}"
 controller_script="${2:?controller_script required}"
@@ -217,12 +221,12 @@ REMOTE
 }
 
 deploy_topfull_loadgen() {
-  local target="$1"
-  local repo_dir="$2"
-  local master_ip="$3"
+	local target="$1"
+	local repo_dir="$2"
+	local master_ip="$3"
 
-  log "Deploying loadgen on ${target}"
-  ssh "${target}" bash -s -- "${repo_dir}" "${master_ip}" <<'REMOTE'
+	log "Deploying loadgen on ${target}"
+	ssh "${target}" bash -s -- "${repo_dir}" "${master_ip}" <<'REMOTE'
 set -euo pipefail
 repo_dir="${1:?repo_dir required}"
 master_ip="${2:?master_ip required}"
@@ -253,11 +257,11 @@ REMOTE
 }
 
 run_setup_master() {
-  local target="$1"
-  local repo_dir="$2"
-  local log_file="$3"
+	local target="$1"
+	local repo_dir="$2"
+	local log_file="$3"
 
-  ssh "${target}" bash -s -- "${repo_dir}" <<'REMOTE' | tee "${log_file}"
+	ssh "${target}" bash -s -- "${repo_dir}" <<'REMOTE' | tee "${log_file}"
 set -euo pipefail
 repo_dir="${1:?repo_dir required}"
 cd "${repo_dir}"
@@ -268,14 +272,14 @@ REMOTE
 }
 
 run_setup_worker() {
-  local target="$1"
-  local repo_dir="$2"
-  local join_cmd="$3"
-  local join_cmd_b64
+	local target="$1"
+	local repo_dir="$2"
+	local join_cmd="$3"
+	local join_cmd_b64
 
-  join_cmd_b64="$(printf "%s" "${join_cmd}" | base64 -w0)"
+	join_cmd_b64="$(printf "%s" "${join_cmd}" | base64 -w0)"
 
-  ssh "${target}" bash -s -- "${repo_dir}" "${join_cmd_b64}" <<'REMOTE'
+	ssh "${target}" bash -s -- "${repo_dir}" "${join_cmd_b64}" <<'REMOTE'
 set -euo pipefail
 repo_dir="${1:?repo_dir required}"
 join_cmd_b64="${2:?join_cmd_b64 required}"
@@ -286,104 +290,104 @@ REMOTE
 }
 
 detect_master_ip() {
-  local target="$1"
-  local ip="${MASTER_IP:-}"
+	local target="$1"
+	local ip="${MASTER_IP:-}"
 
-  if [[ -n "${ip}" ]]; then
-    printf "%s" "${ip}"
-    return
-  fi
+	if [[ -n "${ip}" ]]; then
+		printf "%s" "${ip}"
+		return
+	fi
 
-  ip="$(ssh "${target}" "hostname -I | awk '{print \$1}'" | tr -d '[:space:]')"
-  printf "%s" "${ip}"
+	ip="$(ssh "${target}" "hostname -I | awk '{print \$1}'" | tr -d '[:space:]')"
+	printf "%s" "${ip}"
 }
 
 main() {
-  local master_target worker_target loadgen_target
-  local master_repo_dir worker_repo_dir loadgen_repo_dir
-  local master_log join_cmd
-  local master_ip_for_deploy
+	local master_target worker_target loadgen_target
+	local master_repo_dir worker_repo_dir loadgen_repo_dir
+	local master_log join_cmd
+	local master_ip_for_deploy
 
-  master_target="$(target_host "${MASTER_HOST}")"
-  worker_target="$(target_host "${WORKER_HOST}")"
-  loadgen_target="$(target_host "${LOADGEN_HOST}")"
-  master_ip_for_deploy=""
-  master_log="$(mktemp)"
-  trap "rm -f '${master_log}'" EXIT
+	master_target="$(target_host "${MASTER_HOST}")"
+	worker_target="$(target_host "${WORKER_HOST}")"
+	loadgen_target="$(target_host "${LOADGEN_HOST}")"
+	master_ip_for_deploy=""
+	master_log="$(mktemp)"
+	trap "rm -f '${master_log}'" EXIT
 
-  log "Coordinating setup via SSH"
-  log "Master: ${master_target}, Worker: ${worker_target}, Loadgen: ${loadgen_target}"
-  log "Repo: ${REPO_URL}, Branch: ${BRANCH}"
+	log "Coordinating setup via SSH"
+	log "Master: ${master_target}, Worker: ${worker_target}, Loadgen: ${loadgen_target}"
+	log "Repo: ${REPO_URL}, Branch: ${BRANCH}"
 
-  master_repo_dir="$(resolve_remote_repo_dir "${master_target}")"
-  worker_repo_dir="$(resolve_remote_repo_dir "${worker_target}")"
-  loadgen_repo_dir="$(resolve_remote_repo_dir "${loadgen_target}")"
+	master_repo_dir="$(resolve_remote_repo_dir "${master_target}")"
+	worker_repo_dir="$(resolve_remote_repo_dir "${worker_target}")"
+	loadgen_repo_dir="$(resolve_remote_repo_dir "${loadgen_target}")"
 
-  log "Step 0/3: prepare repo + .env on nodes"
-  ensure_repo_on_node "${master_target}" "${master_repo_dir}"
-  push_env_to_node "${master_target}" "${master_repo_dir}"
-  push_setup_scripts_to_node "${master_target}" "${master_repo_dir}"
+	log "Step 0/3: prepare repo + .env on nodes"
+	ensure_repo_on_node "${master_target}" "${master_repo_dir}"
+	push_env_to_node "${master_target}" "${master_repo_dir}"
+	push_setup_scripts_to_node "${master_target}" "${master_repo_dir}"
 
-  ensure_repo_on_node "${worker_target}" "${worker_repo_dir}"
-  push_env_to_node "${worker_target}" "${worker_repo_dir}"
-  push_setup_scripts_to_node "${worker_target}" "${worker_repo_dir}"
+	ensure_repo_on_node "${worker_target}" "${worker_repo_dir}"
+	push_env_to_node "${worker_target}" "${worker_repo_dir}"
+	push_setup_scripts_to_node "${worker_target}" "${worker_repo_dir}"
 
-  if [[ "${SKIP_LOADGEN_PREP}" != "1" ]]; then
-    ensure_repo_on_node "${loadgen_target}" "${loadgen_repo_dir}"
-    push_env_to_node "${loadgen_target}" "${loadgen_repo_dir}"
-    push_setup_scripts_to_node "${loadgen_target}" "${loadgen_repo_dir}"
-  else
-    log "SKIP_LOADGEN_PREP=1, skip loadgen preparation"
-  fi
+	if [[ "${SKIP_LOADGEN_PREP}" != "1" ]]; then
+		ensure_repo_on_node "${loadgen_target}" "${loadgen_repo_dir}"
+		push_env_to_node "${loadgen_target}" "${loadgen_repo_dir}"
+		push_setup_scripts_to_node "${loadgen_target}" "${loadgen_repo_dir}"
+	else
+		log "SKIP_LOADGEN_PREP=1, skip loadgen preparation"
+	fi
 
-  log "Step 1/3: setup master on ${master_target}"
-  run_setup_master "${master_target}" "${master_repo_dir}" "${master_log}"
+	log "Step 1/3: setup master on ${master_target}"
+	run_setup_master "${master_target}" "${master_repo_dir}" "${master_log}"
 
-  join_cmd="$(sed -n 's/^__JOIN_CMD__=//p' "${master_log}" | tail -n 1)"
-  if [[ -z "${join_cmd}" ]]; then
-    echo "Failed to capture join command from master setup output."
-    exit 1
-  fi
+	join_cmd="$(sed -n 's/^__JOIN_CMD__=//p' "${master_log}" | tail -n 1)"
+	if [[ -z "${join_cmd}" ]]; then
+		echo "Failed to capture join command from master setup output."
+		exit 1
+	fi
 
-  log "Step 2/3: setup worker on ${worker_target}"
-  run_setup_worker "${worker_target}" "${worker_repo_dir}" "${join_cmd}"
+	log "Step 2/3: setup worker on ${worker_target}"
+	run_setup_worker "${worker_target}" "${worker_repo_dir}" "${join_cmd}"
 
-  log "Done. Cluster bootstrap flow completed."
+	log "Done. Cluster bootstrap flow completed."
 
-  master_ip_for_deploy="$(detect_master_ip "${master_target}")"
-  if [[ -z "${master_ip_for_deploy}" ]]; then
-    echo "Failed to detect MASTER_IP from ${master_target}."
-    echo "Set MASTER_IP in .env and rerun."
-    exit 1
-  fi
-  log "Using master IP for deploy: ${master_ip_for_deploy}"
+	master_ip_for_deploy="$(detect_master_ip "${master_target}")"
+	if [[ -z "${master_ip_for_deploy}" ]]; then
+		echo "Failed to detect MASTER_IP from ${master_target}."
+		echo "Set MASTER_IP in .env and rerun."
+		exit 1
+	fi
+	log "Using master IP for deploy: ${master_ip_for_deploy}"
 
-  log "Step 3/3: push runtime files + deploy TopFull"
-  push_file_list_to_node "${master_target}" "${master_repo_dir}" \
-    "TopFull_master/online_boutique_scripts/src/global_config.json" \
-    "TopFull_master/online_boutique_scripts/src/deploy_rl.py" \
-    "TopFull_master/online_boutique_scripts/src/deploy_mimd.py" \
-    "TopFull_master/online_boutique_scripts/src/deploy_without_cluster.py" \
-    "TopFull_master/online_boutique_scripts/src/metric_collector.py" \
-    "TopFull_master/online_boutique_scripts/src/overload_detection.py" \
-    "TopFull_master/online_boutique_scripts/src/proxy/proxy_online_boutique.go" \
-    "TopFull_master/online_boutique_scripts/src/proxy/proxy_train_ticket.go"
+	log "Step 3/3: push runtime files + deploy TopFull"
+	push_file_list_to_node "${master_target}" "${master_repo_dir}" \
+		"TopFull_master/online_boutique_scripts/src/global_config.json" \
+		"TopFull_master/online_boutique_scripts/src/deploy_rl.py" \
+		"TopFull_master/online_boutique_scripts/src/deploy_mimd.py" \
+		"TopFull_master/online_boutique_scripts/src/deploy_without_cluster.py" \
+		"TopFull_master/online_boutique_scripts/src/metric_collector.py" \
+		"TopFull_master/online_boutique_scripts/src/overload_detection.py" \
+		"TopFull_master/online_boutique_scripts/src/proxy/proxy_online_boutique.go" \
+		"TopFull_master/online_boutique_scripts/src/proxy/proxy_train_ticket.go"
 
-  if [[ "${SKIP_LOADGEN_PREP}" != "1" ]]; then
-    push_file_list_to_node "${loadgen_target}" "${loadgen_repo_dir}" \
-      "TopFull_loadgen/online_boutique_create.sh" \
-      "TopFull_loadgen/online_boutique_create2.sh" \
-      "TopFull_loadgen/locust_online_boutique.py"
-  fi
+	if [[ "${SKIP_LOADGEN_PREP}" != "1" ]]; then
+		push_file_list_to_node "${loadgen_target}" "${loadgen_repo_dir}" \
+			"TopFull_loadgen/online_boutique_create.sh" \
+			"TopFull_loadgen/online_boutique_create2.sh" \
+			"TopFull_loadgen/locust_online_boutique.py"
+	fi
 
-  deploy_topfull_master "${master_target}" "${master_repo_dir}"
+	deploy_topfull_master "${master_target}" "${master_repo_dir}"
 
-  if [[ "${SKIP_LOADGEN_PREP}" != "1" ]]; then
-    deploy_topfull_loadgen "${loadgen_target}" "${loadgen_repo_dir}" "${master_ip_for_deploy}"
-    log "TopFull deploy started. Check tmux sessions: topfull-proxy, topfull-controller, topfull-metrics, topfull-loadgen"
-  else
-    log "TopFull deploy started on master (loadgen skipped by SKIP_LOADGEN_PREP=1). Check tmux: topfull-proxy, topfull-controller, topfull-metrics"
-  fi
+	if [[ "${SKIP_LOADGEN_PREP}" != "1" ]]; then
+		deploy_topfull_loadgen "${loadgen_target}" "${loadgen_repo_dir}" "${master_ip_for_deploy}"
+		log "TopFull deploy started. Check tmux sessions: topfull-proxy, topfull-controller, topfull-metrics, topfull-loadgen"
+	else
+		log "TopFull deploy started on master (loadgen skipped by SKIP_LOADGEN_PREP=1). Check tmux: topfull-proxy, topfull-controller, topfull-metrics"
+	fi
 }
 
 main "$@"
