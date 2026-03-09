@@ -1,8 +1,7 @@
-import gym, ray
-from ray.rllib.algorithms import ppo
+# MIMD uses heuristic only; skip Ray/PPO to avoid TensorFlow/AVX crashes on some nodes
 import random
+import time
 import numpy as np
-from skeleton_simulator import *
 from metric_collector import Collector
 from overload_detection import *
 import csv
@@ -18,61 +17,6 @@ global_config = {
     k: os.path.expandvars(os.path.expanduser(v)) if isinstance(v, str) else v
     for k, v in global_config.items()
 }
-
-N_DISCRETE_ACTIONS = 5
-feature = 2
-MAX_STEPS = 50
-addstep = 5
-mulstep = 0.1
-
-class MyEnv(gym.Env):
-    def __init__(self, env_config):
-        self.action_space = gym.spaces.Box(low=np.array([-0.5]), high=np.array([0.5]), dtype=np.float32)
-        self.observation_space = gym.spaces.Box(low=np.array([-2000.0, -1000.0]), high=np.array([2000.0, 50000.0]), dtype=np.float32)
-        self.MAX_STEPS = MAX_STEPS
-        self.addstep = addstep
-        self.mulstep = mulstep
-
-    def reset(self):
-        self.ts = Simulator(addstep,mulstep)
-        self.goodput = self.ts.currGoodput
-        self.maxgoodput = self.ts.targetGoodput
-        self.count = 0
-        self.stopcount = 0
-        initdelta = self.ts.simGoodput(0) - self.goodput
-        self.state = np.array([initdelta, self.ts.simLatency(0)])
-        self.reward = 0
-        self.done = False
-        self.info = {}
-        return self.state
-
-    def step(self, action):
-        if self.done:
-            print("EPISODE DONE!!!") 
-        elif self.count == self.MAX_STEPS:
-            self.reward = -40 
-            self.done = True
-        elif self.stopcount == 3:
-            if self.maxgoodput > self.goodput + addstep*3:
-                self.reward = -(100-self.count) 
-            else:
-                self.reward = (100-self.count) 
-            self.done = True
-        else:
-            self.count += 1
-            tmpGoodput = self.goodput
-            self.goodput = self.ts.simGoodput(action)
-            self.maxgoodput = max(self.goodput, self.maxgoodput)
-            deltaGoodput = self.goodput - tmpGoodput
-            self.state = np.array([deltaGoodput, self.ts.simLatency(action)])
-            self.reward = deltaGoodput
-            if action == 0:
-                self.stopcount += 1
-            else:
-                self.stopcount = 0
-                self.reward -= 0.01*self.count
-
-        return self.state, self.reward, self.done, self.info
 
 def run_agent(agent, event):
     while True:
@@ -221,19 +165,10 @@ class Agent:
         self.terminate = True
         self.detector.event.set()
 
-# Initialize RL
-ray.init()
-algo = ppo.PPO(env=MyEnv, config={
-    "env_config": {
-        'api': 1
-    },
-    'num_workers': 1  # config to pass to env class
-})
-ts = Simulator(addstep,mulstep)
-checkpoint_path = global_config["checkpoint_path"]
-algo.restore(checkpoint_path)
-
+# MIMD uses heuristic only; no Ray/PPO (avoids TensorFlow/AVX crashes)
+algo = None
 detector = Detector()
+print("MIMD controller started (heuristic only, no RL).")
 current_agent = []
 
 # Start Loop

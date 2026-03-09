@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 import random
 from locust import HttpLocust, TaskSet, between, task, events, constant_throughput, constant_pacing, HttpUser, LoadTestShape, tag
 from locust.contrib.fasthttp import FastHttpUser 
@@ -290,7 +291,9 @@ class WebsiteUser(HttpUser):
     wait_time = constant_throughput(1)
 
     def on_start(self):
-        self.client.proxies = {"http": "http://10.8.0.4:8090"}
+        # Baseline (no control): no proxy, requests go directly to --host (frontend NodePort).
+        if not os.environ.get("TOPFULL_BASELINE"):
+            self.client.proxies = {"http": "http://10.8.0.4:8090"}
         self.client.verify = False
     
     @tag('postcheckout')

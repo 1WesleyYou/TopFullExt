@@ -51,6 +51,10 @@ push_runtime_file() {
 
 MASTER_REPO_DIR="$(resolve_remote_repo_dir)"
 
+# Ensure cAdvisor is ready before starting MIMD; otherwise CPU metrics stay at 0.
+echo "[mimd] Ensuring cAdvisor is ready on ${MASTER_TARGET}..."
+bash "${SCRIPT_DIR}/ensure_cadvisor.sh"
+
 # Sync runtime files to avoid stale remote scripts.
 push_runtime_file "${MASTER_REPO_DIR}" "TopFull_master/online_boutique_scripts/src/deploy_mimd.py"
 push_runtime_file "${MASTER_REPO_DIR}" "TopFull_master/online_boutique_scripts/src/metric_collector.py"
@@ -76,7 +80,7 @@ tmux kill-session -t topfull-metrics 2>/dev/null || true
 : > /tmp/topfull-metrics.log
 
 tmux new-session -d -s topfull-proxy "ulimit -n 65535 || true; cd '${src_dir}/proxy' && go run proxy_online_boutique.go > /tmp/topfull-proxy.log 2>&1"
-tmux new-session -d -s topfull-controller "cd '${src_dir}' && python3 deploy_mimd.py > /tmp/topfull-controller.log 2>&1"
+tmux new-session -d -s topfull-controller "cd '${src_dir}' && PYTHONUNBUFFERED=1 python3 deploy_mimd.py > /tmp/topfull-controller.log 2>&1"
 tmux new-session -d -s topfull-metrics "cd '${src_dir}' && python3 metric_collector.py > /tmp/topfull-metrics.log 2>&1"
 
 tmux ls

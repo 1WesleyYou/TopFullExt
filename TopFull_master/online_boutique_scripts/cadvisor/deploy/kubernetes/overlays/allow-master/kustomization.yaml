@@ -1,0 +1,11 @@
+# Overlay: allow cAdvisor to run on control-plane and use lower resources for tight clusters
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: cadvisor
+resources:
+  - ../../base
+patches:
+  - path: tolerations-and-resources.yaml
+    target:
+      kind: DaemonSet
+      name: cadvisor
