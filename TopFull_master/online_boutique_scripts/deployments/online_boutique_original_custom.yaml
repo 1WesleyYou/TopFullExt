@@ -174,10 +174,14 @@ spec:
         ports:
         - containerPort: 8080
         readinessProbe:
+          timeoutSeconds: 5
+          failureThreshold: 6
           periodSeconds: 5
           exec:
             command: ["/bin/grpc_health_probe", "-addr=:8080"]
         livenessProbe:
+          timeoutSeconds: 5
+          failureThreshold: 6
           periodSeconds: 5
           exec:
             command: ["/bin/grpc_health_probe", "-addr=:8080"]
@@ -581,9 +585,15 @@ spec:
         - name: DISABLE_DEBUGGER
           value: "1"
         readinessProbe:
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 6
           exec:
             command: ["/bin/grpc_health_probe", "-addr=:7000"]
         livenessProbe:
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 6
           exec:
             command: ["/bin/grpc_health_probe", "-addr=:7000"]
         resources:
