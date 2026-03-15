@@ -10,6 +10,7 @@ import threading
 import sys
 import json
 import os
+import time
 
 global_config_path = os.path.expanduser("~/TopFullExt/TopFull_master/online_boutique_scripts/src/global_config.json")
 with open(global_config_path, "r") as f:

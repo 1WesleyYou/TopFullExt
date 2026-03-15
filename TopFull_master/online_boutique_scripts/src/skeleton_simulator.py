@@ -88,4 +88,5 @@ class Simulator:
     def noisedata(self, path):
         ##load from collected data
         ##calculate mean and standard deviation from the data
-        return noise
+        # placeholder: keep safe default until data-driven noise is implemented
+        return 0.0

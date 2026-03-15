@@ -1,4 +1,5 @@
-import gym, ray
+import gymnasium as gym
+import ray
 from ray.rllib.algorithms import ppo
 
 import random
@@ -8,15 +9,27 @@ from skeleton_simulator import *
 from metric_collector import *
 from overload_detection import *
 import time
+import json
+import os
 
 
+
+global_config_path = os.path.expanduser("~/TopFullExt/TopFull_master/online_boutique_scripts/src/global_config.json")
+with open(global_config_path, "r") as f:
+    global_config = json.load(f)
+global_config = {
+    k: os.path.expandvars(os.path.expanduser(v)) if isinstance(v, str) else v
+    for k, v in global_config.items()
+}
 
 N_DISCRETE_ACTIONS = 5
 feature = 2
 MAX_STEPS = 50
+addstep = 5
+mulstep = 0.1
 
 #collector = Collector(code="online_boutique")
-target_api = "query_order"
+target_api = global_config.get("training_target_api") or global_config["record_target"][0]
 
 class MyEnv(gym.Env):
     def __init__(self, env_config):
@@ -24,10 +37,11 @@ class MyEnv(gym.Env):
         self.observation_space = gym.spaces.Box(low=np.array([-2000.0, -1000.0]), high=np.array([2000.0, 50000.0]), dtype=np.float32)
         self.MAX_STEPS = MAX_STEPS
 
-    def reset(self):
+    def reset(self, *, seed=None, options=None):
+        super().reset(seed=seed)
         self.detector = Detector()
-        self.collector = Collector(code="train_ticket")
-        self.ts = Simulator()
+        self.collector = Collector(code=global_config["microservice_code"])
+        self.ts = Simulator(addstep, mulstep)
         self.detector.apis[target_api]['threshold'] = 1000
         self.detector.reset([target_api])
         time.sleep(5)
@@ -41,15 +55,17 @@ class MyEnv(gym.Env):
         self.detector.reset([target_api])
         self.goodput = rps - fail
 
-        self.state = np.array([(rps - fail)/rps, init_latency])
+        denom = max(rps, 1e-6)
+        self.state = np.array([(rps - fail)/denom, init_latency])
         self.reward = 0
         self.done = False
         self.info = {}
-        return self.state
+        return self.state, self.info
 
     def step(self, action):
         if self.done:
-            print("EPISODE DONE!!!") 
+            print("EPISODE DONE!!!")
+            return self.state, self.reward, True, False, self.info
         elif self.count == self.MAX_STEPS:
 
             self.done = True
@@ -85,7 +101,7 @@ class MyEnv(gym.Env):
                 self.reward -= latency*0.01
  
 
-        return self.state, self.reward, self.done, self.info
+        return self.state, self.reward, self.done, False, self.info
 
 
 
@@ -94,14 +110,21 @@ algo = ppo.PPO(env=MyEnv, config={
     "env_config": {},  # config to pass to env class
     'num_workers': 0,
 })
-checkpoint_path = "./checkpoint_000701"
-algo.restore(checkpoint_path)
+checkpoint_path = global_config["checkpoint_path"]
+checkpoint_state_file = os.path.join(checkpoint_path, "algorithm_state.pkl")
+if os.path.isfile(checkpoint_state_file):
+    print(f"Restoring from checkpoint: {checkpoint_path}")
+    algo.restore(checkpoint_path)
+else:
+    print(f"Checkpoint not found ({checkpoint_path}), train from scratch.")
 
 
 _ = 0
+save_path = os.path.abspath("./models_transfer/v1tmp1/rllib_checkpoint")
+os.makedirs(save_path, exist_ok=True)
 while True:
     if _ % 1 == 0:
-        algo.save("./models_transfer/v1tmp1/rllib_checkpoint")
+        algo.save(save_path)
         print(_)
     _ += 1
     print(algo.train()['episode_reward_mean'])

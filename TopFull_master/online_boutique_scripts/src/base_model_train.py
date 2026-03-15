@@ -16,7 +16,7 @@ mulstep = 0.1
 
 class MyEnv(gym.Env):
     def __init__(self, env_config):
-        self.action_space = gym.spaces.Discrete(N_DISCRETE_ACTIONS)
+        self.action_space = gym.spaces.Box(low=np.array([-0.5]), high=np.array([0.5]), dtype=np.float32)
         self.observation_space = gym.spaces.Box(low=np.array([-2000.0, -1000.0]), high=np.array([2000.0, 50000.0]), dtype=np.float32)
         self.MAX_STEPS = MAX_STEPS
         self.addstep = addstep
@@ -45,6 +45,7 @@ class MyEnv(gym.Env):
             tmpGoodput = self.goodput
             self.goodput = self.ts.simGoodput(action)
             latency = self.ts.simLatency(action)
+            deltaGoodput = self.goodput - tmpGoodput
 
             goodputPerThres = self.goodput/self.ts.thresGoodput
             self.state = np.array([goodputPerThres, latency])

@@ -10,6 +10,7 @@ import threading
 import sys
 import json
 import os
+import time
 
 global_config_path = os.path.expanduser("~/TopFullExt/TopFull_master/online_boutique_scripts/src/global_config.json")
 with open(global_config_path, "r") as f:
@@ -165,12 +166,18 @@ class Agent:
 
         # RL
         obs = np.array([state, latency]) 
-        action = self.algo.compute_single_action(obs)
+        raw_action = self.algo.compute_single_action(obs)
+        if isinstance(raw_action, tuple):
+            raw_action = raw_action[0]
+        if isinstance(raw_action, (np.ndarray, list)):
+            action = float(np.asarray(raw_action).reshape(-1)[0])
+        else:
+            action = float(raw_action)
 
         # print("----------")
         # print(f"Threshold: {self.threshold} -> Goodput: {goodput}")
         # print(f"From observation {obs}, action: {action}")
-        self.detector.apply_v2(float(action), self.target_apis, [])
+        self.detector.apply_v2(action, self.target_apis, [])
         
         self.threshold = 0
         for api in self.target_apis:
