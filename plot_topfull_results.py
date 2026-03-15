@@ -40,8 +40,8 @@ API_STYLE = {
     "emptycart": (CB_COLORS["purple"], (0, (3, 1, 1, 1))),
 }
 
-# Upstream (shallow) -> downstream (deep)
-API_DEPTH_ORDER = ["getproduct", "getcart", "postcart", "emptycart", "postcheckout"]
+# Hardcoded API order: short path -> long path
+API_DEPTH_ORDER = ["emptycart", "postcart", "getcart", "getproduct", "postcheckout"]
 
 
 def detect_logs_dir(explicit_logs_dir: str | None) -> Path:
@@ -169,9 +169,9 @@ def plot_api_goodput(
     output_path: Path,
     max_points: int | None = None,
 ) -> None:
-    fig, ax = plt.subplots(1, 1, figsize=(11, 4.5))
+    fig, ax = plt.subplots(1, 1, figsize=(11, 4.8))
     any_curve = False
-    line_by_api = {}
+    line_by_api: Dict[str, object] = {}
 
     for api in apis:
         csv_path = logs_dir / f"{api}.csv"
@@ -185,7 +185,6 @@ def plot_api_goodput(
         y = to_float_list(rows, "Goodput")
         x = list(range(len(y)))
         color, linestyle = API_STYLE.get(api, (CB_COLORS["black"], "-"))
-        # marker sparsely to improve distinguishability without clutter
         markevery = max(1, len(x) // 30)
         line, = ax.plot(
             x,
@@ -205,7 +204,7 @@ def plot_api_goodput(
     if not any_curve:
         raise RuntimeError(f"No API CSV curves found under: {logs_dir}")
 
-    ax.set_title("Per-API Goodput")
+    ax.set_title("Per-API Goodput (hardcoded short -> long order)")
     ax.set_xlabel("time index (1 row = 1 sample)")
     ax.set_ylabel("goodput")
     ax.grid(alpha=0.25)
@@ -237,7 +236,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--apis",
-        default="getproduct,getcart,postcart,emptycart,postcheckout",
+        default="emptycart,postcart,getcart,getproduct,postcheckout",
         help="Comma-separated API names for per-API goodput chart",
     )
     parser.add_argument(
@@ -303,6 +302,7 @@ def main() -> None:
     print(f"logs_dir={logs_dir}")
     print(f"rows_total={original_total_rows}")
     print(f"rows_used={used_total_rows}")
+    print(f"api_order_short_to_long={','.join(apis)}")
     print(f"saved={total_out}")
     print(f"saved={api_out}")
 
