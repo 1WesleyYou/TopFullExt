@@ -1,9 +1,10 @@
-.PHONY: help mimd rl cadvisor inject inject-base inject-surge baseline observe status stop start-no-ctrl pack check-mimd
+.PHONY: help mimd rl train cadvisor inject inject-base inject-surge baseline observe status stop start-no-ctrl pack check-mimd
 
 help:
 	@echo "TopFull quick commands:"
 	@echo "  make mimd           - one-click MIMD start (auto ensure cAdvisor, then proxy + controller + metrics)"
 	@echo "  make rl             - one-click RL start (auto ensure cAdvisor, then proxy + controller + metrics)"
+	@echo "  make train          - start online RL training (proxy + metrics + transfer_learning, no injection)"
 	@echo "  make cadvisor       - ensure/redeploy cAdvisor on master and wait until ready"
 	@echo "  make start          - start proxy + metrics only on master (no controller)"
 	@echo "  make inject         - start normal load injection on loadgen"
@@ -21,6 +22,9 @@ mimd:
 
 rl:
 	@bash ./run_rl_stack.sh
+
+train:
+	@bash ./run_rl_train.sh
 
 cadvisor:
 	@bash ./ensure_cadvisor.sh

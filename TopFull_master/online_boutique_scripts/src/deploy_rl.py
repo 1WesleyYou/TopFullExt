@@ -110,7 +110,6 @@ class Agent:
 
     def run(self):
         print(f"{self.target_apis} running")
-        # return
         if self.ttl <= 0:
             self.stop(reset=True)
             print("ttl done")
@@ -135,7 +134,7 @@ class Agent:
             self.stop(reset=True)
             print("zero threshold")
             return
-        
+
         # Disaggregate decision
         tmp_overload_services = self.detector.detect(0.8)
         disaggregate_apis = []
@@ -153,7 +152,6 @@ class Agent:
             self.disaggregate_apis = disaggregate_apis
             self.stop(reset=False)
             return
-            
 
         state = goodput / self.threshold
         latency = max(latencys)
@@ -165,7 +163,7 @@ class Agent:
             return
 
         # RL
-        obs = np.array([state, latency]) 
+        obs = np.array([state, latency])
         raw_action = self.algo.compute_single_action(obs)
         if isinstance(raw_action, tuple):
             raw_action = raw_action[0]
@@ -178,11 +176,11 @@ class Agent:
         # print(f"Threshold: {self.threshold} -> Goodput: {goodput}")
         # print(f"From observation {obs}, action: {action}")
         self.detector.apply_v2(action, self.target_apis, [])
-        
+
         self.threshold = 0
         for api in self.target_apis:
             self.threshold += self.detector.apis[api]['threshold']
-        
+
         self.ttl -= 1
 
     def add_apis(self, new_apis):
