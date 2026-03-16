@@ -23,6 +23,12 @@ target_host() {
 LOADGEN_TARGET="$(target_host "${LOADGEN_NODE:-node2}")"
 PROJECT_NAME="${PROJECT_NAME:-TopFullExt}"
 MASTER_IP_VALUE="${MASTER_IP:-}"
+INJECT_DURATION="${1:-${INJECT_DURATION:-15m}}"
+
+if [[ ! "${INJECT_DURATION}" =~ ^[0-9]+[smhd]$ ]]; then
+  echo "Invalid duration: ${INJECT_DURATION}. Expected format like 30m, 2h, 45s."
+  exit 1
+fi
 
 if [[ -z "${MASTER_IP_VALUE}" ]]; then
   if [[ -n "${SSH_USER:-}" ]]; then
@@ -33,10 +39,11 @@ if [[ -z "${MASTER_IP_VALUE}" ]]; then
   MASTER_IP_VALUE="$(ssh "${MASTER_TARGET}" "hostname -I | awk '{print \$1}'" | tr -d '[:space:]')"
 fi
 
-ssh "${LOADGEN_TARGET}" bash -s -- "${PROJECT_NAME}" "${MASTER_IP_VALUE}" <<'REMOTE'
+ssh "${LOADGEN_TARGET}" bash -s -- "${PROJECT_NAME}" "${MASTER_IP_VALUE}" "${INJECT_DURATION}" <<'REMOTE'
 set -euo pipefail
 project_name="${1:-TopFullExt}"
 master_ip="${2:?master_ip required}"
+duration="${3:-15m}"
 loadgen_dir="${HOME}/${project_name}/TopFull_loadgen"
 
 cd "${loadgen_dir}"
@@ -48,6 +55,7 @@ fi
 # Rewrite target frontend/proxy endpoint before every run.
 sed -i -E "s|--host=http://[0-9.]+:30440|--host=http://${master_ip}:30440|g" run_fig15_online_boutique.sh
 sed -i -E "s|http://[0-9.]+:8090|http://${master_ip}:8090|g" locust_online_boutique.py
+sed -i -E "s|-t [0-9]+[smhd]|-t ${duration}|g" run_fig15_online_boutique.sh
 bash ./run_fig15_online_boutique.sh
 tmux ls 2>/dev/null | egrep 'session1|session2|session3' || true
 pgrep -af locust >/dev/null || { echo "locust did not start"; exit 1; }

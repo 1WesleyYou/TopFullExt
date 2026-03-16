@@ -9,7 +9,7 @@ help:
 	@echo "  make start          - start proxy + metrics only on master (no controller)"
 	@echo "  make inject         - start normal load injection on loadgen"
 	@echo "  make inject-base    - start Figure15 base load"
-	@echo "  make inject-surge   - start Figure15 surge load"
+	@echo "  make inject-surge   - start Figure15 surge load (optional: DURATION=2h)"
 	@echo "  make baseline       - start loadgen only, no control (for baseline experiment)"
 	@echo "  make observe        - show mitigation effect snapshot"
 	@echo "  make status         - show overall runtime status"
@@ -39,7 +39,7 @@ inject-base:
 	@./start_injection_base.sh
 
 inject-surge:
-	@./start_injection_surge.sh
+	@INJECT_DURATION="$(DURATION)" ./start_injection_surge.sh
 
 baseline:
 	@./start_baseline.sh
