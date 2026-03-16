@@ -1,4 +1,9 @@
-import gymnasium as gym
+try:
+    import gymnasium as gym
+    IS_GYMNASIUM = True
+except ModuleNotFoundError:
+    import gym
+    IS_GYMNASIUM = False
 import ray
 from ray.rllib.algorithms import ppo
 
@@ -30,6 +35,7 @@ mulstep = 0.1
 
 #collector = Collector(code="online_boutique")
 target_api = global_config.get("training_target_api") or global_config["record_target"][0]
+MIN_THRESHOLD = 10.0
 
 class MyEnv(gym.Env):
     def __init__(self, env_config):
@@ -38,7 +44,11 @@ class MyEnv(gym.Env):
         self.MAX_STEPS = MAX_STEPS
 
     def reset(self, *, seed=None, options=None):
-        super().reset(seed=seed)
+        try:
+            super().reset(seed=seed)
+        except TypeError:
+            # Older gym versions may not accept keyword reset args.
+            super().reset()
         self.detector = Detector()
         self.collector = Collector(code=global_config["microservice_code"])
         self.ts = Simulator(addstep, mulstep)
@@ -48,38 +58,45 @@ class MyEnv(gym.Env):
 
         self.count = 0
         metric = self.collector.query()
-        rps, fail, init_latency = metric[target_api]
+        if target_api not in metric:
+            print(f"metric for '{target_api}' not ready in reset; use fallback zeros.")
+        rps, fail, init_latency = metric.get(target_api, (0.0, 0.0, 0.0))
 
-        self.detector.apis[target_api]['threshold'] = rps
-        self.threshold = rps
+        self.detector.apis[target_api]['threshold'] = rps if rps > MIN_THRESHOLD else 100.0
+        self.threshold = self.detector.apis[target_api]['threshold']
         self.detector.reset([target_api])
         self.goodput = rps - fail
 
-        denom = max(rps, 1e-6)
-        self.state = np.array([(rps - fail)/denom, init_latency])
+        denom = max(self.threshold, 1e-6)
+        self.state = np.array([self.goodput/denom, init_latency])
         self.reward = 0
         self.done = False
         self.info = {}
-        return self.state, self.info
+        if IS_GYMNASIUM:
+            return self.state, self.info
+        return self.state
 
     def step(self, action):
         if self.done:
             print("EPISODE DONE!!!")
-            return self.state, self.reward, True, False, self.info
+            if IS_GYMNASIUM:
+                return self.state, self.reward, True, False, self.info
+            return self.state, self.reward, True, self.info
         elif self.count == self.MAX_STEPS:
 
             self.done = True
         else:
             self.count += 1
             metric = self.collector.query()
-            rps, fail, latency = metric[target_api]
+            rps, fail, latency = metric.get(target_api, (0.0, 0.0, 0.0))
             tmpGoodput = rps - fail
 
             new_threshold = (1 + float(action)) * self.threshold
-            if new_threshold <= 10:
-                new_threshold = 10
-            if new_threshold > rps * 1.1:
-                new_threshold = rps * 1.1
+            if new_threshold <= MIN_THRESHOLD:
+                new_threshold = MIN_THRESHOLD
+            dynamic_cap = max(rps * 1.1, MIN_THRESHOLD)
+            if new_threshold > dynamic_cap:
+                new_threshold = dynamic_cap
 
             self.detector.apis[target_api]['threshold'] = new_threshold
             apply_threshold_proxy([self.detector.apis[target_api]])
@@ -87,13 +104,13 @@ class MyEnv(gym.Env):
             time.sleep(1)
 
             metric = self.collector.query()
-            rps, fail, latency = metric[target_api]
+            rps, fail, latency = metric.get(target_api, (0.0, 0.0, 0.0))
             self.goodput = rps - fail
 
             deltaGoodput = self.goodput - tmpGoodput
             self.threshold = self.detector.apis[target_api]['threshold']
             
-            goodputPerThres = self.goodput/self.threshold
+            goodputPerThres = self.goodput / max(self.threshold, 1e-6)
 
             self.state = np.array([goodputPerThres, latency])
             self.reward = deltaGoodput
@@ -101,7 +118,9 @@ class MyEnv(gym.Env):
                 self.reward -= latency*0.01
  
 
-        return self.state, self.reward, self.done, False, self.info
+        if IS_GYMNASIUM:
+            return self.state, self.reward, self.done, False, self.info
+        return self.state, self.reward, self.done, self.info
 
 
 
