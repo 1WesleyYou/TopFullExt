@@ -60,7 +60,7 @@ class MyEnv(gym.Env):
         metric = self.collector.query()
         if target_api not in metric:
             print(f"metric for '{target_api}' not ready in reset; use fallback zeros.")
-        rps, fail, init_latency = metric.get(target_api, (0.0, 0.0, 0.0))
+        rps, fail, init_latency95, _ = metric.get(target_api, (0.0, 0.0, 0.0, 0.0))
 
         self.detector.apis[target_api]['threshold'] = rps if rps > MIN_THRESHOLD else 100.0
         self.threshold = self.detector.apis[target_api]['threshold']
@@ -68,7 +68,7 @@ class MyEnv(gym.Env):
         self.goodput = rps - fail
 
         denom = max(self.threshold, 1e-6)
-        self.state = np.array([self.goodput/denom, init_latency])
+        self.state = np.array([self.goodput/denom, init_latency95])
         self.reward = 0
         self.done = False
         self.info = {}
@@ -88,7 +88,7 @@ class MyEnv(gym.Env):
         else:
             self.count += 1
             metric = self.collector.query()
-            rps, fail, latency = metric.get(target_api, (0.0, 0.0, 0.0))
+            rps, fail, latency95, _ = metric.get(target_api, (0.0, 0.0, 0.0, 0.0))
             tmpGoodput = rps - fail
 
             new_threshold = (1 + float(action)) * self.threshold
@@ -104,7 +104,7 @@ class MyEnv(gym.Env):
             time.sleep(1)
 
             metric = self.collector.query()
-            rps, fail, latency = metric.get(target_api, (0.0, 0.0, 0.0))
+            rps, fail, latency95, _ = metric.get(target_api, (0.0, 0.0, 0.0, 0.0))
             self.goodput = rps - fail
 
             deltaGoodput = self.goodput - tmpGoodput
@@ -112,10 +112,10 @@ class MyEnv(gym.Env):
             
             goodputPerThres = self.goodput / max(self.threshold, 1e-6)
 
-            self.state = np.array([goodputPerThres, latency])
+            self.state = np.array([goodputPerThres, latency95])
             self.reward = deltaGoodput
-            if latency > 1000:
-                self.reward -= latency*0.01
+            if latency95 > 1000:
+                self.reward -= latency95*0.01
  
 
         if IS_GYMNASIUM:

@@ -5,7 +5,7 @@ Plot TopFull experiment results from CSV logs.
 Default behavior:
 - Auto-detect logs directory from global_config.json if possible.
 - Generate two figures:
-  1) total_metrics.png (RPS / Goodput / Fail / Latency95)
+  1) total_metrics.png (RPS / Goodput / Fail / Latency95 / Latency99)
   2) api_goodput.png   (per-API Goodput curves)
 """
 
@@ -137,6 +137,7 @@ def plot_total(total_rows: List[Dict[str, str]], output_path: Path) -> None:
     fail = to_float_list(total_rows, "Fail")
     goodput = to_float_list(total_rows, "Goodput")
     lat95 = to_float_list(total_rows, "Latency95")
+    lat99 = to_float_list(total_rows, "Latency99")
 
     fig, axes = plt.subplots(3, 1, figsize=(11, 8), sharex=True)
 
@@ -152,6 +153,7 @@ def plot_total(total_rows: List[Dict[str, str]], output_path: Path) -> None:
     axes[1].grid(alpha=0.25)
 
     axes[2].plot(t, lat95, color=CB_COLORS["orange"], linestyle="-.", linewidth=2.0, label="Latency95")
+    axes[2].plot(t, lat99, color=CB_COLORS["purple"], linestyle=":", linewidth=2.0, label="Latency99")
     axes[2].set_ylabel("ms")
     axes[2].set_xlabel("time index (1 row = 1 sample)")
     axes[2].legend()

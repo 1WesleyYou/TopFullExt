@@ -122,8 +122,8 @@ class Agent:
         metric = self.collector.query()
         latencys = []
         for api in self.target_apis:
-            api_rps, api_fail, api_latency = metric[api]
-            latencys.append(api_latency)
+            api_rps, api_fail, api_latency95, _ = metric[api]
+            latencys.append(api_latency95)
             goodput += api_rps - api_fail
 
             if api_fail <= 0.1 * api_rps and self.detector.apis[api]['threshold'] >= rps.get(api) or rps.get(api) == 0:

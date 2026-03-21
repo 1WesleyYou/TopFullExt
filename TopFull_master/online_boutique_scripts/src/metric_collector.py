@@ -63,8 +63,12 @@ class Collector:
             data = response.text
             data = data.split("/")[:-1]
             for i in range(len(self.code)):
+                if i >= len(data):
+                    continue
                 elem = data[i]
                 tmp = elem.split("=")
+                if len(tmp) < 5:
+                    continue
 
                 name = tmp[0]
                 rps = tmp[1]
@@ -79,8 +83,7 @@ class Collector:
                 else:
                     result[name] = [float(rps), float(fail), float(latency95), float(latency99)]
         for name in list(result.keys()):
-            result[name] = (result[name][0], result[name][1], result[name][2])
-            # result[name] = (result[name][0], result[name][1], result[name][2], result[name][3])
+            result[name] = (result[name][0], result[name][1], result[name][2], result[name][3])
         return result
 
     
@@ -181,13 +184,17 @@ def record_online_boutique():
         total_latency99 = 0
 
         for i, api in enumerate(apis):
-            # rps, fail, latency95, latency99 = metric[api]
             if api not in metric:
                 # Loadgen endpoints may not be fully up yet; keep collector alive.
-                rps, fail, latency95 = 0.0, 0.0, 0.0
+                rps, fail, latency95, latency99 = 0.0, 0.0, 0.0, 0.0
             else:
-                rps, fail, latency95 = metric[api]
-            latency99 = 0
+                values = metric[api]
+                if len(values) >= 4:
+                    rps, fail, latency95, latency99 = values[:4]
+                else:
+                    # Backward compatibility with legacy 3-tuple collectors.
+                    rps, fail, latency95 = values[:3]
+                    latency99 = 0.0
             total_rps += rps
             total_fail += fail
             total_latency95 += latency95
