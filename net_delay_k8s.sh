@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Kubernetes Pod-level network delay injection via tc/netem.
+# Kubernetes Pod-level network delay injection via tcconfig (tcset/tcdel).
 #
 # Usage:
 #   ./net_delay_k8s.sh set    # inject delay
 #   ./net_delay_k8s.sh clear  # remove delay
 #   ./net_delay_k8s.sh run    # timed inject + release + cleanup
-#   ./net_delay_k8s.sh status # show current netem qdisc on targets
+#   ./net_delay_k8s.sh status # show current qdisc on targets
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="${SCRIPT_DIR}/.env"
@@ -96,25 +96,21 @@ done
 REMOTE_MAP
 }
 
-# ---- tc/netem operations ----
+# ---- tcconfig operations ----
 
 apply_netem_on_pod() {
   local node="$1" cid="$2" pod="$3"
   local node_target
   node_target="$(target_host "${node}")"
 
-  local delay_arg="delay ${NET_DELAY_MS}ms"
-  if [[ "${NET_JITTER_MS}" != "0" ]]; then
-    delay_arg="${delay_arg} ${NET_JITTER_MS}ms"
-  fi
-  local loss_arg=""
-  if [[ "${NET_LOSS_PCT}" != "0" ]]; then
-    loss_arg="loss ${NET_LOSS_PCT}%"
-  fi
-
-  ssh "${node_target}" bash -s -- "${cid}" "${NET_IFACE}" "${delay_arg}" "${loss_arg}" "${NET_DIRECTION}" <<'REMOTE_APPLY'
+  ssh "${node_target}" bash -s -- "${cid}" "${NET_IFACE}" "${NET_DELAY_MS}" "${NET_JITTER_MS}" "${NET_LOSS_PCT}" "${NET_DIRECTION}" <<'REMOTE_APPLY'
 set -euo pipefail
-cid="${1:?}"; iface="${2:?}"; delay_arg="${3}"; loss_arg="${4}"; direction="${5:-egress}"
+cid="${1:?}"
+iface="${2:?}"
+delay_ms="${3:-200}"
+jitter_ms="${4:-0}"
+loss_pct="${5:-0}"
+direction="${6:-egress}"
 
 pid="$(sudo docker inspect -f '{{.State.Pid}}' "${cid}" 2>/dev/null || true)"
 if [[ -z "${pid}" || "${pid}" == "0" ]]; then
@@ -125,30 +121,37 @@ if [[ -z "${pid}" || "${pid}" == "0" ]]; then
   exit 0
 fi
 
-apply_qdisc() {
-  sudo nsenter -t "${pid}" -n tc qdisc del dev "${iface}" root 2>/dev/null || true
-  sudo nsenter -t "${pid}" -n tc qdisc add dev "${iface}" root netem ${delay_arg} ${loss_arg}
-}
+tcset_bin="${HOME}/.local/bin/tcset"
+tcdel_bin="${HOME}/.local/bin/tcdel"
+if [[ ! -x "${tcset_bin}" ]]; then
+  tcset_bin="$(command -v tcset || true)"
+fi
+if [[ ! -x "${tcdel_bin}" ]]; then
+  tcdel_bin="$(command -v tcdel || true)"
+fi
+if [[ -z "${tcset_bin}" || -z "${tcdel_bin}" ]]; then
+  echo "ERROR: tcconfig(tcset/tcdel) not found on node (expected ~/.local/bin/tcset)" >&2
+  exit 1
+fi
 
-apply_ingress_qdisc() {
-  sudo nsenter -t "${pid}" -n tc qdisc del dev "${iface}" ingress 2>/dev/null || true
-  sudo nsenter -t "${pid}" -n tc qdisc add dev "${iface}" handle ffff: ingress 2>/dev/null || true
-  sudo nsenter -t "${pid}" -n tc filter del dev "${iface}" parent ffff: 2>/dev/null || true
-  sudo nsenter -t "${pid}" -n ip link add ifb0 type ifb 2>/dev/null || true
-  sudo nsenter -t "${pid}" -n ip link set ifb0 up 2>/dev/null || true
-  sudo nsenter -t "${pid}" -n tc qdisc del dev ifb0 root 2>/dev/null || true
-  sudo nsenter -t "${pid}" -n tc qdisc add dev ifb0 root netem ${delay_arg} ${loss_arg}
-  sudo nsenter -t "${pid}" -n tc filter add dev "${iface}" parent ffff: \
-    protocol ip u32 match u32 0 0 action mirred egress redirect dev ifb0
-}
+sudo nsenter -t "${pid}" -n "${tcdel_bin}" "${iface}" --all >/dev/null 2>&1 || true
+
+tcset_base=(sudo nsenter -t "${pid}" -n "${tcset_bin}" "${iface}" --delay "${delay_ms}ms" --overwrite)
+if [[ "${jitter_ms}" != "0" ]]; then
+  tcset_base+=(--delay-distro "${jitter_ms}ms")
+fi
+if [[ "${loss_pct}" != "0" ]]; then
+  tcset_base+=(--loss "${loss_pct}")
+fi
 
 case "${direction}" in
-  egress)   apply_qdisc ;;
-  ingress)  apply_ingress_qdisc ;;
-  both)     apply_qdisc; apply_ingress_qdisc ;;
+  egress) "${tcset_base[@]}" --direction outgoing ;;
+  ingress) "${tcset_base[@]}" --direction incoming ;;
+  both) "${tcset_base[@]}" --direction outgoing; "${tcset_base[@]}" --direction incoming ;;
+  *) echo "WARN: unsupported direction=${direction}, fallback to egress" >&2; "${tcset_base[@]}" --direction outgoing ;;
 esac
 REMOTE_APPLY
-  log "  applied netem on pod=${pod} node=${node} (${NET_DELAY_MS}ms +${NET_JITTER_MS}ms jitter, ${NET_LOSS_PCT}% loss, ${NET_DIRECTION})"
+  log "  applied delay on pod=${pod} node=${node} (${NET_DELAY_MS}ms +${NET_JITTER_MS}ms jitter, ${NET_LOSS_PCT}% loss, ${NET_DIRECTION}, engine=tcconfig)"
 }
 
 clear_netem_on_pod() {
@@ -166,11 +169,17 @@ fi
 if [[ -z "${pid}" || "${pid}" == "0" ]]; then
   exit 0
 fi
-sudo nsenter -t "${pid}" -n tc qdisc del dev "${iface}" root 2>/dev/null || true
-sudo nsenter -t "${pid}" -n tc qdisc del dev "${iface}" ingress 2>/dev/null || true
-sudo nsenter -t "${pid}" -n ip link del ifb0 2>/dev/null || true
+tcdel_bin="${HOME}/.local/bin/tcdel"
+if [[ ! -x "${tcdel_bin}" ]]; then
+  tcdel_bin="$(command -v tcdel || true)"
+fi
+if [[ -z "${tcdel_bin}" ]]; then
+  echo "ERROR: tcdel not found on node (expected ~/.local/bin/tcdel)" >&2
+  exit 1
+fi
+sudo nsenter -t "${pid}" -n "${tcdel_bin}" "${iface}" --all >/dev/null 2>&1 || true
 REMOTE_CLEAR
-  log "  cleared netem on pod=${pod} node=${node}"
+  log "  cleared tcconfig rules on pod=${pod} node=${node}"
 }
 
 show_netem_on_pod() {
@@ -211,7 +220,7 @@ do_set() {
     exit 1
   fi
 
-  log "Applying netem rules (delay=${NET_DELAY_MS}ms jitter=${NET_JITTER_MS}ms loss=${NET_LOSS_PCT}% direction=${NET_DIRECTION})..."
+  log "Applying tcconfig rules (delay=${NET_DELAY_MS}ms jitter=${NET_JITTER_MS}ms loss=${NET_LOSS_PCT}% direction=${NET_DIRECTION})..."
   while IFS=' ' read -r pod node cid; do
     apply_netem_on_pod "${node}" "${cid}" "${pod}"
   done <<< "${map_output}"
@@ -233,7 +242,7 @@ do_clear() {
     return 0
   fi
 
-  log "Clearing netem rules..."
+  log "Clearing tcconfig rules..."
   while IFS=' ' read -r pod node cid; do
     clear_netem_on_pod "${node}" "${cid}" "${pod}"
   done <<< "${map_output}"
@@ -255,7 +264,7 @@ do_status() {
     return 0
   fi
 
-  echo "========== netem qdisc status =========="
+  echo "========== qdisc status =========="
   while IFS=' ' read -r pod node cid; do
     show_netem_on_pod "${node}" "${cid}" "${pod}"
   done <<< "${map_output}"
