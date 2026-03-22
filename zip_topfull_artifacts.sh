@@ -6,7 +6,37 @@ set -euo pipefail
 # - Generated PNG files under repo root
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DEFAULT_LOGS_DIR="${SCRIPT_DIR}/TopFull_master/online_boutique_scripts/src/logs"
+ENV_FILE="${SCRIPT_DIR}/.env"
+if [[ -f "${ENV_FILE}" ]]; then
+  # shellcheck disable=SC1090
+  source "${ENV_FILE}"
+fi
+
+resolve_default_logs_dir() {
+  local candidates=()
+  local c
+
+  if [[ -n "${RECORD_PATH:-}" ]]; then
+    candidates+=("${RECORD_PATH%/}")
+  fi
+  if [[ -n "${PROJECT_ROOT:-}" ]]; then
+    candidates+=("${PROJECT_ROOT}/TopFull_master/online_boutique_scripts/src/logs")
+  fi
+  candidates+=("${HOME}/${PROJECT_NAME:-TopFullExt}/TopFull_master/online_boutique_scripts/src/logs")
+  candidates+=("${SCRIPT_DIR}/TopFull_master/online_boutique_scripts/src/logs")
+
+  for c in "${candidates[@]}"; do
+    if [[ -d "${c}" ]]; then
+      printf "%s" "${c}"
+      return 0
+    fi
+  done
+
+  # Fallback to first candidate for clearer error reporting later.
+  printf "%s" "${candidates[0]}"
+}
+
+DEFAULT_LOGS_DIR="$(resolve_default_logs_dir)"
 LOGS_DIR="${TOPFULL_LOGS_DIR:-${DEFAULT_LOGS_DIR}}"
 
 usage() {
