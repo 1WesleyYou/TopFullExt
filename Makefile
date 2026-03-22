@@ -1,4 +1,4 @@
-.PHONY: help mimd rl train cadvisor inject inject-base inject-surge baseline observe status stop start-no-ctrl pack check-mimd
+.PHONY: help mimd rl train cadvisor inject inject-base inject-surge baseline observe status stop start-no-ctrl pack check-mimd net-delay-set net-delay-clear net-delay-run net-delay-status
 
 help:
 	@echo "TopFull quick commands:"
@@ -16,6 +16,12 @@ help:
 	@echo "  make stop           - stop controller + loadgen (clear all injection)"
 	@echo "  make pack           - zip logs (CSV) + PNG into one archive"
 	@echo "  make check-mimd     - diagnose why MIMD/rate_config might not be updating"
+	@echo ""
+	@echo "Network delay injection:"
+	@echo "  make net-delay-set     - inject network delay on target pods"
+	@echo "  make net-delay-clear   - remove network delay from target pods"
+	@echo "  make net-delay-run     - timed inject + release (uses NET_INJECT_AT_SEC / NET_RELEASE_AT_SEC)"
+	@echo "  make net-delay-status  - show netem qdisc on target pods"
 
 mimd:
 	@./run_mimd_stack.sh
@@ -58,3 +64,15 @@ pack:
 
 check-mimd:
 	@./check_mimd_running.sh
+
+net-delay-set:
+	@bash ./net_delay_k8s.sh set
+
+net-delay-clear:
+	@bash ./net_delay_k8s.sh clear
+
+net-delay-run:
+	@bash ./net_delay_k8s.sh run
+
+net-delay-status:
+	@bash ./net_delay_k8s.sh status

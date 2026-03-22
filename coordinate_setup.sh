@@ -132,7 +132,7 @@ push_setup_scripts_to_node() {
 	log "Pushing setup scripts to ${target}:${repo_dir}"
 	ssh "${target}" "mkdir -p \"${repo_dir}\""
 
-	for f in setup.sh setup_master.sh setup_worker.sh coordinate_setup.sh; do
+	for f in setup.sh setup_master.sh setup_worker.sh coordinate_setup.sh net_delay_k8s.sh; do
 		if [[ -f "${SCRIPT_DIR}/${f}" ]]; then
 			scp "${SCRIPT_DIR}/${f}" "${target}:${repo_dir}/${f}"
 		fi
@@ -302,6 +302,35 @@ detect_master_ip() {
 	printf "%s" "${ip}"
 }
 
+preflight_netem_deps() {
+	local master_target="$1"
+	local worker_target="$2"
+
+	log "Pre-flight: checking tc/netem dependencies on cluster nodes"
+
+	local ok=1
+
+	if ! ssh "${master_target}" "command -v kubectl >/dev/null 2>&1"; then
+		log "WARN: kubectl not found on ${master_target} (needed for pod resolution)"
+		ok=0
+	fi
+
+	for node_target in "${master_target}" "${worker_target}"; do
+		for cmd in tc nsenter; do
+			if ! ssh "${node_target}" "command -v ${cmd} >/dev/null 2>&1"; then
+				log "WARN: ${cmd} not found on ${node_target}, installing iproute2 + util-linux..."
+				ssh "${node_target}" "sudo apt-get update -qq && sudo apt-get install -y -qq iproute2 util-linux" || true
+			fi
+		done
+	done
+
+	if [[ "${ok}" == "0" ]]; then
+		log "WARN: some netem pre-flight checks failed; net_delay_k8s.sh may not work until resolved"
+	else
+		log "Pre-flight: netem dependencies OK"
+	fi
+}
+
 main() {
 	local master_target worker_target loadgen_target
 	local master_repo_dir worker_repo_dir loadgen_repo_dir
@@ -353,6 +382,8 @@ main() {
 	run_setup_worker "${worker_target}" "${worker_repo_dir}" "${join_cmd}"
 
 	log "Done. Cluster bootstrap flow completed."
+
+	preflight_netem_deps "${master_target}" "${worker_target}"
 
 	master_ip_for_deploy="$(detect_master_ip "${master_target}")"
 	if [[ -z "${master_ip_for_deploy}" ]]; then

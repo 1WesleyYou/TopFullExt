@@ -81,6 +81,59 @@ else:
 PY"
   ssh "${loadgen_target}" "curl -fsSI --max-time 5 http://${MASTER_IP_VALUE}:${FRONTEND_NODEPORT} | sed -n '1,2p' || echo 'frontend not reachable from loadgen'"
 
+  local net_selector="${NET_TARGET_SELECTOR:-}"
+  local net_pods="${NET_TARGET_PODS:-}"
+  local net_ns="${NET_NAMESPACE:-default}"
+  local net_iface="${NET_IFACE:-eth0}"
+
+  if [[ -n "${net_selector}" || -n "${net_pods}" ]]; then
+    section "Network Delay Injection (netem)"
+    echo "  selector: ${net_selector}"
+    echo "  pods:     ${net_pods}"
+    echo "  namespace: ${net_ns}"
+
+    local target_pods=""
+    if [[ -n "${net_selector}" ]]; then
+      target_pods="$(ssh "${master_target}" "kubectl get pods -n '${net_ns}' -l '${net_selector}' -o jsonpath='{range .items[*]}{.metadata.name}{\" \"}{end}'" | xargs)"
+    else
+      target_pods="${net_pods}"
+    fi
+
+    if [[ -z "${target_pods}" ]]; then
+      echo "  (no matching pods found)"
+    else
+      for pod in ${target_pods}; do
+        local node cid pid_info
+        node="$(ssh "${master_target}" "kubectl get pod -n '${net_ns}' '${pod}' -o jsonpath='{.spec.nodeName}' 2>/dev/null" || true)"
+        cid="$(ssh "${master_target}" "kubectl get pod -n '${net_ns}' '${pod}' -o jsonpath='{.status.containerStatuses[0].containerID}' 2>/dev/null" || true)"
+        cid="${cid#docker://}"
+        cid="${cid#containerd://}"
+
+        if [[ -n "${node}" && -n "${cid}" ]]; then
+          local node_tgt
+          node_tgt="$(target_host "${node}")"
+          local qdisc_out
+          qdisc_out="$(ssh "${node_tgt}" bash -s -- "${cid}" "${net_iface}" <<'NETEM_CHECK'
+cid="${1:?}"; iface="${2:?}"
+pid="$(sudo docker inspect -f '{{.State.Pid}}' "${cid}" 2>/dev/null || true)"
+if [[ -z "${pid}" || "${pid}" == "0" ]]; then
+  pid="$(sudo crictl inspect --output go-template --template '{{.info.pid}}' "${cid}" 2>/dev/null || true)"
+fi
+if [[ -z "${pid}" || "${pid}" == "0" ]]; then
+  echo "(cannot resolve PID)"
+  exit 0
+fi
+sudo nsenter -t "${pid}" -n tc qdisc show dev "${iface}" 2>/dev/null || echo "(no qdisc)"
+NETEM_CHECK
+)" || true
+          echo "  ${pod} [${node}]: ${qdisc_out}"
+        else
+          echo "  ${pod}: (cannot resolve node/container)"
+        fi
+      done
+    fi
+  fi
+
 }
 
 main "$@"
