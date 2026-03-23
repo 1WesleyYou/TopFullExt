@@ -20,6 +20,24 @@ global_config = {
     for k, v in global_config.items()
 }
 
+def _read_env_file():
+    env_path = os.path.expanduser("~/TopFullExt/.env")
+    d = {}
+    if os.path.isfile(env_path):
+        with open(env_path) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                d[k.strip()] = v.strip()
+    return d
+
+_dot_env = _read_env_file()
+FORCED_GATE = os.environ.get("FORCED_GATE", "0") == "1"
+FORCED_GATE_START = int(os.environ.get("NET_INJECT_AT_SEC", _dot_env.get("NET_INJECT_AT_SEC", "0")))
+FORCED_GATE_END = int(os.environ.get("NET_RELEASE_AT_SEC", _dot_env.get("NET_RELEASE_AT_SEC", "0")))
+
 N_DISCRETE_ACTIONS = 5
 feature = 2
 MAX_STEPS = 50
@@ -244,6 +262,10 @@ if os.path.exists(log_path + "num_agent.csv"):
 if os.path.exists(log_path + "execution_time.csv"):
     os.remove(log_path+"execution_time.csv")
 
+_loop_start_time = time.time()
+if FORCED_GATE:
+    print(f"[forced-gate] enabled: window [{FORCED_GATE_START}s, {FORCED_GATE_END}s]")
+
 # Start Loop
 while True:
     time.sleep(2)
@@ -290,9 +312,24 @@ while True:
 
     # Detect overload
     overloaded_services = detector.detect(0.8)
+
+    elapsed = time.time() - _loop_start_time
+    forced_active = (
+        FORCED_GATE
+        and FORCED_GATE_END > FORCED_GATE_START > 0
+        and FORCED_GATE_START <= elapsed <= FORCED_GATE_END
+    )
+
     if len(overloaded_services) == 0:
-        print("No overloaded services")
-        continue
+        if forced_active and len(current_agent) == 0:
+            print(f"[forced-gate] t={elapsed:.0f}s, forcing control on all APIs")
+            overloaded_services = ["frontend"]
+        else:
+            if forced_active:
+                print(f"[forced-gate] t={elapsed:.0f}s, agent already active, skip force-create")
+            else:
+                print("No overloaded services")
+            continue
     for svc in overloaded_services:
         cluster_apis = detector.clustering([svc])
         print(cluster_apis)

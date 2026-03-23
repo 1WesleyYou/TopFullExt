@@ -81,7 +81,7 @@ tmux kill-session -t topfull-metrics 2>/dev/null || true
 : > /tmp/topfull-metrics.log
 
 tmux new-session -d -s topfull-proxy "ulimit -n 65535 || true; cd '${src_dir}/proxy' && go run proxy_online_boutique.go > /tmp/topfull-proxy.log 2>&1"
-tmux new-session -d -s topfull-controller "cd '${src_dir}' && PYTHONUNBUFFERED=1 python3 deploy_rl.py > /tmp/topfull-controller.log 2>&1"
+tmux new-session -d -s topfull-controller "cd '${src_dir}' && PYTHONUNBUFFERED=1 FORCED_GATE=1 python3 deploy_rl.py > /tmp/topfull-controller.log 2>&1"
 tmux new-session -d -s topfull-metrics "cd '${src_dir}' && python3 metric_collector.py > /tmp/topfull-metrics.log 2>&1"
 
 tmux ls
