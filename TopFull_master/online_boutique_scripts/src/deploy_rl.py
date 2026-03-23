@@ -263,6 +263,7 @@ if os.path.exists(log_path + "execution_time.csv"):
     os.remove(log_path+"execution_time.csv")
 
 _loop_start_time = time.time()
+_forced_gate_closed = False
 if FORCED_GATE:
     print(f"[forced-gate] enabled: window [{FORCED_GATE_START}s, {FORCED_GATE_END}s]")
 
@@ -306,6 +307,23 @@ while True:
             current_agent[i] = None
     current_agent += tmp_current_agent
     current_agent = [i for i in current_agent if i is not None]
+    elapsed = time.time() - _loop_start_time
+    if (
+        FORCED_GATE
+        and not _forced_gate_closed
+        and FORCED_GATE_END > FORCED_GATE_START > 0
+        and elapsed > FORCED_GATE_END
+    ):
+        if len(current_agent) > 0:
+            print(f"[forced-gate] t={elapsed:.0f}s, force-closing {len(current_agent)} active agents")
+            for agent, _, event in current_agent:
+                event.set()
+                agent.stop(reset=True)
+            current_agent = []
+        else:
+            print(f"[forced-gate] t={elapsed:.0f}s, no active agents to close")
+        _forced_gate_closed = True
+
     with open(log_path + "num_agent.csv", "a") as f:
         w = csv.writer(f)
         w.writerow([len(current_agent)])
@@ -313,7 +331,6 @@ while True:
     # Detect overload
     overloaded_services = detector.detect(0.8)
 
-    elapsed = time.time() - _loop_start_time
     forced_active = (
         FORCED_GATE
         and FORCED_GATE_END > FORCED_GATE_START > 0
