@@ -1,13 +1,8 @@
 """
-BACA-Lite: Bottleneck-aware heuristic controller (G2 upper bound).
+HEU-C: timeout-aware bottleneck heuristic.
 
-Minimal-invasive behavior:
-- Reuse Collector + apply_threshold_proxy channel.
-- Reuse .env gate window (NET_INJECT_AT_SEC / NET_RELEASE_AT_SEC).
-- Keep API-weighted budgeting logic, but avoid "slow-then-overkill" behavior:
-  1) Use pre-window baseline as budget base.
-  2) Warm-start thresholds when entering gate window.
-  3) Temporarily relax slew-rate in first few control rounds.
+This file intentionally updates the existing heuristic implementation in-place.
+No new controller script is introduced.
 """
 
 import csv
@@ -23,7 +18,14 @@ from overload_detection import apply_threshold_proxy
 
 
 Metric = Dict[str, Tuple[float, float, float, float]]
+FailStats = Dict[str, Tuple[float, float, float, float]]  # total_rps, reject_rps, accept_rps, reject_ratio
 ThresholdMap = Dict[str, float]
+ApiSignal = Dict[str, float]
+
+MODE_NORMAL = "NORMAL"
+MODE_PROTECTIVE = "PROTECTIVE"
+MODE_EMERGENCY = "EMERGENCY"
+MODE_RECOVERY = "RECOVERY"
 
 
 def _read_env_file() -> Dict[str, str]:
@@ -64,39 +66,18 @@ def _env_int(name: str, env_map: Dict[str, str], default: int) -> int:
         return default
 
 
-def compute_signals(
-    metric: Metric,
-    affected_apis: List[str],
-    current_total: float,
-    pre_window_baseline: float,
-    target_latency_ms: float,
-) -> Tuple[float, float, float, float]:
-    affected_rps = 0.0
-    affected_fail = 0.0
-    affected_l95_max = 0.0
-    for api in affected_apis:
-        api_metric = metric.get(api)
-        if api_metric is None:
-            continue
-        affected_rps += float(api_metric[0])
-        affected_fail += float(api_metric[1])
-        affected_l95_max = max(affected_l95_max, float(api_metric[2]))
-
-    fail_ratio = affected_fail / affected_rps if affected_rps > 0 else 0.0
-    latency_excess = max(0.0, (affected_l95_max - target_latency_ms) / max(target_latency_ms, 1.0))
-    latency_score = min(latency_excess / 2.0, 1.0)  # saturate around 3x target latency
-    if pre_window_baseline > 0:
-        throughput_drop = clamp(1.0 - current_total / pre_window_baseline, 0.0, 1.0)
-    else:
-        throughput_drop = 0.0
-
-    severity = clamp(0.55 * fail_ratio + 0.30 * latency_score + 0.15 * throughput_drop, 0.0, 1.0)
-    return severity, fail_ratio, affected_l95_max, throughput_drop
+def _env_bool(name: str, env_map: Dict[str, str], default: bool) -> bool:
+    raw = os.environ.get(name, env_map.get(name))
+    if raw is None or raw == "":
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
-def budget_factor(severity: float, min_budget_factor: float, emergency_severity: float) -> float:
-    slope = 1.10 if severity >= emergency_severity else 0.85
-    return clamp(1.0 - slope * severity, min_budget_factor, 1.0)
+def normalize_positive(values: Dict[str, float]) -> Dict[str, float]:
+    total = sum(max(v, 0.0) for v in values.values())
+    if total <= 0:
+        return {k: 0.0 for k in values}
+    return {k: max(v, 0.0) / total for k, v in values.items()}
 
 
 def current_rps(proxy_url: str) -> Dict[str, float]:
@@ -127,6 +108,94 @@ def api_rps(api: str, metric: Metric, rps: Dict[str, float]) -> float:
     return float(metric.get(api, (0.0, 0.0, 0.0, 0.0))[0])
 
 
+def build_api_signal(
+    api: str,
+    metric: Metric,
+    rps_map: Dict[str, float],
+    fail_stats: FailStats,
+    baseline_rps: float,
+    target_latency_ms: float,
+) -> ApiSignal:
+    m = metric.get(api, (0.0, 0.0, 0.0, 0.0))
+    rps = float(api_rps(api, metric, rps_map))
+    fail = float(m[1])
+    l95 = float(m[2])
+    proxy_total, proxy_reject, _, _ = fail_stats.get(api, (0.0, 0.0, 0.0, 0.0))
+    reject = min(max(proxy_reject, 0.0), fail)
+    timeout_est = max(fail - reject, 0.0)
+    drop = 0.0
+    if baseline_rps > 0:
+        drop = clamp(1.0 - rps / baseline_rps, 0.0, 1.0)
+    lat_excess = max(0.0, l95 / max(target_latency_ms, 1.0) - 1.0)
+    return {
+        "rps": rps,
+        "fail": fail,
+        "l95": l95,
+        "reject": reject,
+        "timeout_est": timeout_est,
+        "drop": drop,
+        "lat_excess": lat_excess,
+        "proxy_total_rps": proxy_total,
+    }
+
+
+def next_mode(
+    current_mode: str,
+    severity: float,
+    timeout_share: float,
+    l95_max: float,
+    counters: Dict[str, int],
+    conf: Dict[str, float],
+) -> Tuple[str, str]:
+    if current_mode == MODE_NORMAL:
+        if severity > conf["SEVERITY_ENTER_PROTECT"]:
+            counters["normal_to_protect"] += 1
+        else:
+            counters["normal_to_protect"] = 0
+        if counters["normal_to_protect"] >= int(conf["CNT_ENTER_PROTECT"]):
+            return MODE_PROTECTIVE, "severity_enter"
+
+    elif current_mode == MODE_PROTECTIVE:
+        emergency_cond = timeout_share > conf["TIMEOUT_ENTER_EMERGENCY"] or l95_max > conf["LAT_ENTER_EMERGENCY_MS"]
+        if emergency_cond:
+            counters["protect_to_emergency"] += 1
+        else:
+            counters["protect_to_emergency"] = 0
+        if counters["protect_to_emergency"] >= int(conf["CNT_ENTER_EMERGENCY"]):
+            return MODE_EMERGENCY, "timeout_or_latency_spike"
+        if severity < conf["SEVERITY_RECOVER_TO_NORMAL"]:
+            counters["protect_to_normal"] += 1
+        else:
+            counters["protect_to_normal"] = 0
+        if counters["protect_to_normal"] >= int(conf["CNT_PROTECT_TO_NORMAL"]):
+            return MODE_NORMAL, "severity_recovered"
+
+    elif current_mode == MODE_EMERGENCY:
+        recover_cond = timeout_share < conf["TIMEOUT_EXIT_EMERGENCY"] and l95_max < conf["LAT_EXIT_EMERGENCY_MS"]
+        if recover_cond:
+            counters["emergency_to_recovery"] += 1
+        else:
+            counters["emergency_to_recovery"] = 0
+        if counters["emergency_to_recovery"] >= int(conf["CNT_EXIT_EMERGENCY"]):
+            return MODE_RECOVERY, "timeout_latency_recovered"
+
+    elif current_mode == MODE_RECOVERY:
+        if severity < conf["SEVERITY_RECOVER_TO_NORMAL"]:
+            counters["recovery_to_normal"] += 1
+        else:
+            counters["recovery_to_normal"] = 0
+        if counters["recovery_to_normal"] >= int(conf["CNT_RECOVERY_TO_NORMAL"]):
+            return MODE_NORMAL, "stable_recovery"
+        if severity > conf["SEVERITY_RECOVERY_TO_PROTECT"]:
+            counters["recovery_to_protect"] += 1
+        else:
+            counters["recovery_to_protect"] = 0
+        if counters["recovery_to_protect"] >= int(conf["CNT_RECOVERY_TO_PROTECT"]):
+            return MODE_PROTECTIVE, "rebound_detected"
+
+    return current_mode, ""
+
+
 global_config_path = os.path.expanduser(
     "~/TopFullExt/TopFull_master/online_boutique_scripts/src/global_config.json"
 )
@@ -152,25 +221,64 @@ ALL_APIS: List[str] = [a["name"] for a in topo["data"]["api"]]
 AFFECTED_APIS: List[str] = [a["name"] for a in topo["data"]["api"] if BOTTLENECK_SVC in a["execution_path"]]
 SAFE_APIS: List[str] = [a for a in ALL_APIS if a not in AFFECTED_APIS]
 
+# Business weights for affected APIs.
 WEIGHTS: Dict[str, float] = {
-    "postcheckout": 4.0,
-    "getcart": 3.0,
-    "getproduct": 2.0,
-    "postcart": 1.0,
+    "postcheckout": _env_float("BACA_WEIGHT_POSTCHECKOUT", _dot_env, 4.0),
+    "getcart": _env_float("BACA_WEIGHT_GETCART", _dot_env, 3.0),
+    "getproduct": _env_float("BACA_WEIGHT_GETPRODUCT", _dot_env, 2.0),
+    "postcart": _env_float("BACA_WEIGHT_POSTCART", _dot_env, 1.0),
 }
 
+HEUC_ENABLE = _env_bool("BACA_HEUC_ENABLE", _dot_env, True)
 HIGH_THRESHOLD = _env_float("BACA_HIGH_THRESHOLD", _dot_env, 10000.0)
 MIN_THRESHOLD = _env_float("BACA_MIN_THRESHOLD", _dot_env, 10.0)
 TARGET_LATENCY_MS = _env_float("BACA_TARGET_LATENCY_MS", _dot_env, 900.0)
-MIN_BUDGET_FACTOR = _env_float("BACA_MIN_BUDGET_FACTOR", _dot_env, 0.25)
-EMERGENCY_SEVERITY = _env_float("BACA_EMERGENCY_SEVERITY", _dot_env, 0.55)
-NORMAL_SLEW_RATE = _env_float("BACA_NORMAL_SLEW_RATE", _dot_env, 0.20)
-FAST_SLEW_RATE = _env_float("BACA_FAST_SLEW_RATE", _dot_env, 0.60)
-EMERGENCY_SLEW_RATE = _env_float("BACA_EMERGENCY_SLEW_RATE", _dot_env, 0.70)
-FAST_SLEW_CYCLES = _env_int("BACA_FAST_SLEW_CYCLES", _dot_env, 8)
-FLOOR_RATIO_BASE = _env_float("BACA_FLOOR_RATIO_BASE", _dot_env, 0.30)
-FLOOR_RATIO_EMERGENCY = _env_float("BACA_FLOOR_RATIO_EMERGENCY", _dot_env, 0.10)
 INTERVAL_S = _env_int("BACA_INTERVAL_S", _dot_env, 2)
+
+# Severity and budget coefficients.
+SEV_W_FAIL = _env_float("BACA_SEV_W_FAIL", _dot_env, 0.45)
+SEV_W_LAT = _env_float("BACA_SEV_W_LAT", _dot_env, 0.25)
+SEV_W_TIMEOUT = _env_float("BACA_SEV_W_TIMEOUT", _dot_env, 0.30)
+BUDGET_A = _env_float("BACA_BUDGET_A", _dot_env, 0.75)
+BUDGET_B = _env_float("BACA_BUDGET_B", _dot_env, 0.45)
+K_MIN = _env_float("BACA_HEUC_K_MIN", _dot_env, _env_float("BACA_MIN_BUDGET_FACTOR", _dot_env, 0.18))
+
+# Urgency coefficients for stage-B allocation.
+URG_ALPHA_TIMEOUT = _env_float("BACA_URG_ALPHA_TIMEOUT", _dot_env, 0.55)
+URG_BETA_LAT = _env_float("BACA_URG_BETA_LAT", _dot_env, 0.25)
+URG_GAMMA_DROP = _env_float("BACA_URG_GAMMA_DROP", _dot_env, 0.20)
+
+# Mode transition thresholds and dwell counters.
+MODE_CONF: Dict[str, float] = {
+    "SEVERITY_ENTER_PROTECT": _env_float("BACA_SEVERITY_ENTER_PROTECT", _dot_env, 0.40),
+    "TIMEOUT_ENTER_EMERGENCY": _env_float("BACA_TIMEOUT_ENTER_EMERGENCY", _dot_env, 0.20),
+    "LAT_ENTER_EMERGENCY_MS": _env_float("BACA_LAT_ENTER_EMERGENCY_MS", _dot_env, 1800.0),
+    "TIMEOUT_EXIT_EMERGENCY": _env_float("BACA_TIMEOUT_EXIT_EMERGENCY", _dot_env, 0.08),
+    "LAT_EXIT_EMERGENCY_MS": _env_float("BACA_LAT_EXIT_EMERGENCY_MS", _dot_env, 1000.0),
+    "SEVERITY_RECOVER_TO_NORMAL": _env_float("BACA_SEVERITY_RECOVER_TO_NORMAL", _dot_env, 0.25),
+    "SEVERITY_RECOVERY_TO_PROTECT": _env_float("BACA_SEVERITY_RECOVERY_TO_PROTECT", _dot_env, 0.45),
+    "CNT_ENTER_PROTECT": float(_env_int("BACA_CNT_ENTER_PROTECT", _dot_env, 2)),
+    "CNT_ENTER_EMERGENCY": float(_env_int("BACA_CNT_ENTER_EMERGENCY", _dot_env, 2)),
+    "CNT_EXIT_EMERGENCY": float(_env_int("BACA_CNT_EXIT_EMERGENCY", _dot_env, 6)),
+    "CNT_RECOVERY_TO_NORMAL": float(_env_int("BACA_CNT_RECOVERY_TO_NORMAL", _dot_env, 10)),
+    "CNT_RECOVERY_TO_PROTECT": float(_env_int("BACA_CNT_RECOVERY_TO_PROTECT", _dot_env, 2)),
+    "CNT_PROTECT_TO_NORMAL": float(_env_int("BACA_CNT_PROTECT_TO_NORMAL", _dot_env, 4)),
+}
+
+FLOOR_BY_MODE = {
+    MODE_NORMAL: _env_float("BACA_FLOOR_NORMAL", _dot_env, _env_float("BACA_FLOOR_RATIO_BASE", _dot_env, 0.30)),
+    MODE_PROTECTIVE: _env_float("BACA_FLOOR_PROTECTIVE", _dot_env, 0.20),
+    MODE_EMERGENCY: _env_float("BACA_FLOOR_EMERGENCY", _dot_env, _env_float("BACA_FLOOR_RATIO_EMERGENCY", _dot_env, 0.08)),
+    MODE_RECOVERY: _env_float("BACA_FLOOR_RECOVERY", _dot_env, 0.25),
+}
+SLEW_BY_MODE = {
+    MODE_NORMAL: _env_float("BACA_SLEW_NORMAL", _dot_env, _env_float("BACA_NORMAL_SLEW_RATE", _dot_env, 0.20)),
+    MODE_PROTECTIVE: _env_float("BACA_SLEW_PROTECTIVE", _dot_env, 0.45),
+    MODE_EMERGENCY: _env_float("BACA_SLEW_EMERGENCY", _dot_env, _env_float("BACA_EMERGENCY_SLEW_RATE", _dot_env, 0.85)),
+    MODE_RECOVERY: _env_float("BACA_SLEW_RECOVERY", _dot_env, 0.18),
+}
+SHOCK_CYCLES = _env_int("BACA_SHOCK_CYCLES", _dot_env, 3)
+SHOCK_FACTOR = _env_float("BACA_SHOCK_FACTOR", _dot_env, 0.68)
 
 collector = Collector(code=global_config["microservice_code"])
 log_path = global_config["record_path"]
@@ -184,20 +292,32 @@ prev_thresholds: ThresholdMap = {api: HIGH_THRESHOLD for api in ALL_APIS}
 loop_start = time.time()
 was_in_window = False
 gate_closed = False
-fast_slew_left = 0
 pre_window_baseline = 0.0
 pre_window_per_api: ThresholdMap = {api: 0.0 for api in ALL_APIS}
+mode = MODE_NORMAL
+mode_counters = {
+    "normal_to_protect": 0,
+    "protect_to_emergency": 0,
+    "protect_to_normal": 0,
+    "emergency_to_recovery": 0,
+    "recovery_to_normal": 0,
+    "recovery_to_protect": 0,
+}
+shock_left = 0
 
-print("[baca] BACA-Lite started")
-print(f"[baca] bottleneck service: {BOTTLENECK_SVC}")
-print(f"[baca] affected APIs: {AFFECTED_APIS}")
-print(f"[baca] safe APIs: {SAFE_APIS}")
-print(f"[baca] enabled: window [{GATE_START}s, {GATE_END}s]")
+print("[heuc] HEU-C started")
+print(f"[heuc] bottleneck service: {BOTTLENECK_SVC}")
+print(f"[heuc] affected APIs: {AFFECTED_APIS}")
+print(f"[heuc] safe APIs: {SAFE_APIS}")
+print(f"[heuc] enabled: window [{GATE_START}s, {GATE_END}s], heuc_enable={HEUC_ENABLE}")
 print(
-    "[baca] params: "
-    f"min_budget={MIN_BUDGET_FACTOR:.2f}, emergency_severity={EMERGENCY_SEVERITY:.2f}, "
-    f"target_l95={TARGET_LATENCY_MS:.0f}ms, floor(base/emergency)=({FLOOR_RATIO_BASE:.2f}/{FLOOR_RATIO_EMERGENCY:.2f}), "
-    f"slew(normal/fast/emergency)=({NORMAL_SLEW_RATE:.2f}/{FAST_SLEW_RATE:.2f}/{EMERGENCY_SLEW_RATE:.2f})"
+    "[heuc] params: "
+    f"target_l95={TARGET_LATENCY_MS:.0f}ms, k_min={K_MIN:.2f}, "
+    f"floor(N/P/E/R)=({FLOOR_BY_MODE[MODE_NORMAL]:.2f}/{FLOOR_BY_MODE[MODE_PROTECTIVE]:.2f}/"
+    f"{FLOOR_BY_MODE[MODE_EMERGENCY]:.2f}/{FLOOR_BY_MODE[MODE_RECOVERY]:.2f}), "
+    f"slew(N/P/E/R)=({SLEW_BY_MODE[MODE_NORMAL]:.2f}/{SLEW_BY_MODE[MODE_PROTECTIVE]:.2f}/"
+    f"{SLEW_BY_MODE[MODE_EMERGENCY]:.2f}/{SLEW_BY_MODE[MODE_RECOVERY]:.2f}), "
+    f"shock(cycles={SHOCK_CYCLES},factor={SHOCK_FACTOR:.2f})"
 )
 
 while True:
@@ -206,15 +326,15 @@ while True:
     in_window = GATE_END > GATE_START > 0 and GATE_START <= elapsed <= GATE_END
 
     metric = collector.query()
-    rps = current_rps(global_config["proxy_url"])
-    current_total = sum(api_rps(api, metric, rps) for api in AFFECTED_APIS)
+    rps_map = current_rps(global_config["proxy_url"])
+    fail_stats = collector.query_proxy_failstats()
+    current_total = sum(api_rps(api, metric, rps_map) for api in AFFECTED_APIS)
 
-    # Capture baseline capacity before entering gate window.
+    # Capture pre-window healthy baseline.
     if not in_window and elapsed < GATE_START and current_total > 0:
         pre_window_baseline = max(pre_window_baseline, current_total)
-        for a in ALL_APIS:
-            r = api_rps(a, metric, rps)
-            pre_window_per_api[a] = max(pre_window_per_api[a], r)
+        for api in ALL_APIS:
+            pre_window_per_api[api] = max(pre_window_per_api[api], api_rps(api, metric, rps_map))
 
     with open(num_agent_path, "a") as f:
         csv.writer(f).writerow([1 if in_window else 0])
@@ -225,89 +345,152 @@ while True:
             apply_thresholds(reset)
             prev_thresholds = dict(reset)
             gate_closed = True
-            print(f"[baca] t={elapsed:.0f}s window closed, resetting thresholds to {int(HIGH_THRESHOLD)}")
+            mode = MODE_NORMAL
+            shock_left = 0
+            for k in mode_counters:
+                mode_counters[k] = 0
+            print(f"[heuc] t={elapsed:.0f}s window closed, resetting thresholds to {int(HIGH_THRESHOLD)}")
         elif elapsed < GATE_START:
-            print(
-                f"[baca] t={elapsed:.0f}s waiting for window "
-                f"(starts at {GATE_START}s, baseline={pre_window_baseline:.1f})"
-            )
+            print(f"[heuc] t={elapsed:.0f}s waiting for window (starts at {GATE_START}s, baseline={pre_window_baseline:.1f})")
         was_in_window = False
         continue
 
     if not metric:
-        print(f"[baca] t={elapsed:.0f}s no metrics available, skip")
+        print(f"[heuc] t={elapsed:.0f}s no metrics available, skip")
         was_in_window = True
         continue
 
     if not was_in_window:
-        # Warm-start: avoid being constrained by 10000 -> target via slew decay.
         for api in AFFECTED_APIS:
-            prev_thresholds[api] = max(api_rps(api, metric, rps), MIN_THRESHOLD)
+            prev_thresholds[api] = max(api_rps(api, metric, rps_map), MIN_THRESHOLD)
         for api in SAFE_APIS:
             prev_thresholds[api] = HIGH_THRESHOLD
         if pre_window_baseline <= 0:
             pre_window_baseline = max(current_total, 1.0)
-        fast_slew_left = FAST_SLEW_CYCLES
         gate_closed = False
-        print(
-            f"[baca] t={elapsed:.0f}s entering window, "
-            f"warm-start baseline={pre_window_baseline:.1f}, fast_slew={FAST_SLEW_CYCLES}"
+        mode = MODE_NORMAL
+        shock_left = 0
+        for k in mode_counters:
+            mode_counters[k] = 0
+        print(f"[heuc] t={elapsed:.0f}s entering window, warm-start baseline={pre_window_baseline:.1f}")
+
+    # Build per-API affected signals.
+    signals: Dict[str, ApiSignal] = {}
+    for api in AFFECTED_APIS:
+        baseline_api = pre_window_per_api.get(api, 0.0)
+        signals[api] = build_api_signal(
+            api=api,
+            metric=metric,
+            rps_map=rps_map,
+            fail_stats=fail_stats,
+            baseline_rps=baseline_api,
+            target_latency_ms=TARGET_LATENCY_MS,
         )
 
-    severity, fail_ratio, affected_l95_max, throughput_drop = compute_signals(
-        metric=metric,
-        affected_apis=AFFECTED_APIS,
-        current_total=current_total,
-        pre_window_baseline=pre_window_baseline,
-        target_latency_ms=TARGET_LATENCY_MS,
-    )
-    k_value = budget_factor(
-        severity=severity,
-        min_budget_factor=MIN_BUDGET_FACTOR,
-        emergency_severity=EMERGENCY_SEVERITY,
-    )
+    affected_rps = sum(s["rps"] for s in signals.values())
+    affected_fail = sum(s["fail"] for s in signals.values())
+    affected_reject = sum(s["reject"] for s in signals.values())
+    affected_timeout = sum(s["timeout_est"] for s in signals.values())
+    affected_l95_max = max((s["l95"] for s in signals.values()), default=0.0)
+    timeout_share = affected_timeout / max(affected_fail, 1e-6)
+    fail_ratio = affected_fail / max(affected_rps, 1e-6)
+    latency_excess = max(0.0, affected_l95_max / max(TARGET_LATENCY_MS, 1.0) - 1.0)
+    latency_score = min(latency_excess / 2.0, 1.0)
+    throughput_drop = 0.0
     if pre_window_baseline > 0:
-        budget_base = pre_window_baseline
+        throughput_drop = clamp(1.0 - current_total / pre_window_baseline, 0.0, 1.0)
+    severity = clamp(
+        SEV_W_FAIL * fail_ratio + SEV_W_LAT * latency_score + SEV_W_TIMEOUT * timeout_share,
+        0.0,
+        1.0,
+    )
+
+    if HEUC_ENABLE:
+        new_mode, reason = next_mode(
+            current_mode=mode,
+            severity=severity,
+            timeout_share=timeout_share,
+            l95_max=affected_l95_max,
+            counters=mode_counters,
+            conf=MODE_CONF,
+        )
     else:
-        budget_base = max(current_total, 1.0)
+        new_mode, reason = MODE_NORMAL, ""
+    if new_mode != mode:
+        old_mode = mode
+        mode = new_mode
+        for k in mode_counters:
+            mode_counters[k] = 0
+        if mode == MODE_EMERGENCY:
+            shock_left = SHOCK_CYCLES
+        elif old_mode == MODE_EMERGENCY:
+            shock_left = 0
+        print(f"[heuc] t={elapsed:.0f}s mode {old_mode} -> {mode} ({reason})")
+
+    # Budget from baseline capacity.
+    budget_base = pre_window_baseline if pre_window_baseline > 0 else max(current_total, 1.0)
+    k_value = clamp(1.0 - BUDGET_A * severity - BUDGET_B * timeout_share, K_MIN, 1.0)
     budget = budget_base * k_value
 
-    active_affected = [api for api in AFFECTED_APIS if api_rps(api, metric, rps) > 0]
-    w_sum = sum(WEIGHTS.get(api, 1.0) for api in active_affected)
-    if severity >= EMERGENCY_SEVERITY:
-        slew_rate = EMERGENCY_SLEW_RATE
-    elif fast_slew_left > 0:
-        slew_rate = FAST_SLEW_RATE
-    else:
-        slew_rate = NORMAL_SLEW_RATE
-    floor_ratio = FLOOR_RATIO_EMERGENCY if severity >= EMERGENCY_SEVERITY else FLOOR_RATIO_BASE
+    floor_ratio = FLOOR_BY_MODE.get(mode, FLOOR_BY_MODE[MODE_NORMAL])
+    slew_rate = SLEW_BY_MODE.get(mode, SLEW_BY_MODE[MODE_NORMAL])
+
+    floors: Dict[str, float] = {}
+    for api in AFFECTED_APIS:
+        floor_baseline = pre_window_per_api.get(api, 0.0)
+        floors[api] = max(MIN_THRESHOLD, floor_ratio * floor_baseline)
+    floor_sum = sum(floors.values())
+    residual_budget = max(budget - floor_sum, 0.0)
+
+    # Stage-B urgency weighting (timeout-aware).
+    timeout_norm = normalize_positive({api: s["timeout_est"] for api, s in signals.items()})
+    lat_norm = normalize_positive({api: s["lat_excess"] for api, s in signals.items()})
+    drop_norm = normalize_positive({api: s["drop"] for api, s in signals.items()})
+    urgency: Dict[str, float] = {}
+    for api in AFFECTED_APIS:
+        base_u = (
+            URG_ALPHA_TIMEOUT * timeout_norm.get(api, 0.0)
+            + URG_BETA_LAT * lat_norm.get(api, 0.0)
+            + URG_GAMMA_DROP * drop_norm.get(api, 0.0)
+        )
+        if base_u <= 0.0:
+            base_u = 1.0
+        urgency[api] = WEIGHTS.get(api, 1.0) * base_u
+    urgency_sum = sum(urgency.values())
 
     new_thresholds: ThresholdMap = {}
     for api in AFFECTED_APIS:
-        curr = api_rps(api, metric, rps)
-        floor = max(pre_window_per_api.get(api, 0.0) * floor_ratio, MIN_THRESHOLD)
-        if w_sum > 0 and api in active_affected:
-            share = (WEIGHTS.get(api, 1.0) / w_sum) * budget
-        else:
-            share = floor
-        raw = clamp(share, floor, curr * 1.1 if curr > 0 else HIGH_THRESHOLD)
-        lower = prev_thresholds[api] * (1 - slew_rate)
-        upper = prev_thresholds[api] * (1 + slew_rate)
-        new_thresholds[api] = max(clamp(raw, lower, upper), floor)
+        share = residual_budget * urgency[api] / urgency_sum if urgency_sum > 0 else 0.0
+        target = floors[api] + share
+
+        # Emergency shock: aggressively suppress queue growth for first few rounds.
+        if mode == MODE_EMERGENCY and shock_left > 0:
+            target = max(floors[api], target * SHOCK_FACTOR)
+
+        # Avoid over-release in NORMAL/RECOVERY.
+        curr_r = signals[api]["rps"]
+        if mode in (MODE_NORMAL, MODE_RECOVERY) and curr_r > 0:
+            target = min(target, max(floors[api], curr_r * 1.2))
+
+        lower = max(MIN_THRESHOLD, prev_thresholds[api] * (1.0 - slew_rate))
+        upper = max(MIN_THRESHOLD, prev_thresholds[api] * (1.0 + slew_rate))
+        new_thresholds[api] = max(floors[api], clamp(target, lower, upper))
 
     for api in SAFE_APIS:
-        curr = api_rps(api, metric, rps)
+        curr = api_rps(api, metric, rps_map)
         new_thresholds[api] = max(curr * 1.1, HIGH_THRESHOLD)
 
     apply_thresholds(new_thresholds)
     prev_thresholds = dict(new_thresholds)
-    fast_slew_left = max(0, fast_slew_left - 1)
+    if mode == MODE_EMERGENCY and shock_left > 0:
+        shock_left -= 1
     was_in_window = True
 
     thr_str = " ".join(f"{api}={new_thresholds[api]:.1f}" for api in ALL_APIS if api in new_thresholds)
     print(
-        f"[baca] t={elapsed:.0f}s severity={severity:.3f} fail={fail_ratio:.3f} "
-        f"l95={affected_l95_max:.1f}ms drop={throughput_drop:.2f} "
-        f"k={k_value:.2f} budget={budget:.1f} base={budget_base:.1f} "
-        f"floor={floor_ratio:.2f} slew={slew_rate:.2f} | {thr_str}"
+        f"[heuc] t={elapsed:.0f}s mode={mode} severity={severity:.3f} "
+        f"fail={fail_ratio:.3f} reject={affected_reject/max(affected_rps,1e-6):.3f} "
+        f"timeout_share={timeout_share:.3f} l95={affected_l95_max:.1f}ms drop={throughput_drop:.2f} "
+        f"k={k_value:.2f} budget={budget:.1f}/{budget_base:.1f} floor_sum={floor_sum:.1f} "
+        f"residual={residual_budget:.1f} slew={slew_rate:.2f} shock_left={shock_left} | {thr_str}"
     )
