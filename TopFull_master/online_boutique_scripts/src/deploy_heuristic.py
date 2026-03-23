@@ -44,17 +44,59 @@ def clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
 
 
-def compute_severity(metric: Metric) -> float:
-    total_rps = sum(m[0] for m in metric.values())
-    total_fail = sum(m[1] for m in metric.values())
-    max_l95 = max((m[2] for m in metric.values()), default=0.0)
-    fail_ratio = total_fail / total_rps if total_rps > 0 else 0.0
-    lat_score = min(max_l95 / 5000.0, 1.0)
-    return 0.75 * fail_ratio + 0.25 * lat_score
+def _env_float(name: str, env_map: Dict[str, str], default: float) -> float:
+    raw = os.environ.get(name, env_map.get(name))
+    if raw is None or raw == "":
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
 
 
-def budget_factor(severity: float) -> float:
-    return max(0.60, 1.0 - 0.6 * severity)
+def _env_int(name: str, env_map: Dict[str, str], default: int) -> int:
+    raw = os.environ.get(name, env_map.get(name))
+    if raw is None or raw == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def compute_signals(
+    metric: Metric,
+    affected_apis: List[str],
+    current_total: float,
+    pre_window_baseline: float,
+    target_latency_ms: float,
+) -> Tuple[float, float, float, float]:
+    affected_rps = 0.0
+    affected_fail = 0.0
+    affected_l95_max = 0.0
+    for api in affected_apis:
+        api_metric = metric.get(api)
+        if api_metric is None:
+            continue
+        affected_rps += float(api_metric[0])
+        affected_fail += float(api_metric[1])
+        affected_l95_max = max(affected_l95_max, float(api_metric[2]))
+
+    fail_ratio = affected_fail / affected_rps if affected_rps > 0 else 0.0
+    latency_excess = max(0.0, (affected_l95_max - target_latency_ms) / max(target_latency_ms, 1.0))
+    latency_score = min(latency_excess / 2.0, 1.0)  # saturate around 3x target latency
+    if pre_window_baseline > 0:
+        throughput_drop = clamp(1.0 - current_total / pre_window_baseline, 0.0, 1.0)
+    else:
+        throughput_drop = 0.0
+
+    severity = clamp(0.55 * fail_ratio + 0.30 * latency_score + 0.15 * throughput_drop, 0.0, 1.0)
+    return severity, fail_ratio, affected_l95_max, throughput_drop
+
+
+def budget_factor(severity: float, min_budget_factor: float, emergency_severity: float) -> float:
+    slope = 1.10 if severity >= emergency_severity else 0.85
+    return clamp(1.0 - slope * severity, min_budget_factor, 1.0)
 
 
 def current_rps(proxy_url: str) -> Dict[str, float]:
@@ -117,12 +159,18 @@ WEIGHTS: Dict[str, float] = {
     "postcart": 1.0,
 }
 
-HIGH_THRESHOLD = 10000.0
-MIN_THRESHOLD = 10.0
-NORMAL_SLEW_RATE = 0.15
-FAST_SLEW_RATE = 0.45
-FAST_SLEW_CYCLES = 6
-INTERVAL_S = 2
+HIGH_THRESHOLD = _env_float("BACA_HIGH_THRESHOLD", _dot_env, 10000.0)
+MIN_THRESHOLD = _env_float("BACA_MIN_THRESHOLD", _dot_env, 10.0)
+TARGET_LATENCY_MS = _env_float("BACA_TARGET_LATENCY_MS", _dot_env, 900.0)
+MIN_BUDGET_FACTOR = _env_float("BACA_MIN_BUDGET_FACTOR", _dot_env, 0.25)
+EMERGENCY_SEVERITY = _env_float("BACA_EMERGENCY_SEVERITY", _dot_env, 0.55)
+NORMAL_SLEW_RATE = _env_float("BACA_NORMAL_SLEW_RATE", _dot_env, 0.20)
+FAST_SLEW_RATE = _env_float("BACA_FAST_SLEW_RATE", _dot_env, 0.60)
+EMERGENCY_SLEW_RATE = _env_float("BACA_EMERGENCY_SLEW_RATE", _dot_env, 0.70)
+FAST_SLEW_CYCLES = _env_int("BACA_FAST_SLEW_CYCLES", _dot_env, 8)
+FLOOR_RATIO_BASE = _env_float("BACA_FLOOR_RATIO_BASE", _dot_env, 0.30)
+FLOOR_RATIO_EMERGENCY = _env_float("BACA_FLOOR_RATIO_EMERGENCY", _dot_env, 0.10)
+INTERVAL_S = _env_int("BACA_INTERVAL_S", _dot_env, 2)
 
 collector = Collector(code=global_config["microservice_code"])
 log_path = global_config["record_path"]
@@ -145,6 +193,12 @@ print(f"[baca] bottleneck service: {BOTTLENECK_SVC}")
 print(f"[baca] affected APIs: {AFFECTED_APIS}")
 print(f"[baca] safe APIs: {SAFE_APIS}")
 print(f"[baca] enabled: window [{GATE_START}s, {GATE_END}s]")
+print(
+    "[baca] params: "
+    f"min_budget={MIN_BUDGET_FACTOR:.2f}, emergency_severity={EMERGENCY_SEVERITY:.2f}, "
+    f"target_l95={TARGET_LATENCY_MS:.0f}ms, floor(base/emergency)=({FLOOR_RATIO_BASE:.2f}/{FLOOR_RATIO_EMERGENCY:.2f}), "
+    f"slew(normal/fast/emergency)=({NORMAL_SLEW_RATE:.2f}/{FAST_SLEW_RATE:.2f}/{EMERGENCY_SLEW_RATE:.2f})"
+)
 
 while True:
     time.sleep(INTERVAL_S)
@@ -200,20 +254,38 @@ while True:
             f"warm-start baseline={pre_window_baseline:.1f}, fast_slew={FAST_SLEW_CYCLES}"
         )
 
-    severity = compute_severity(metric)
-    k_value = budget_factor(severity)
-    budget_base = max(pre_window_baseline, current_total, 1.0)
+    severity, fail_ratio, affected_l95_max, throughput_drop = compute_signals(
+        metric=metric,
+        affected_apis=AFFECTED_APIS,
+        current_total=current_total,
+        pre_window_baseline=pre_window_baseline,
+        target_latency_ms=TARGET_LATENCY_MS,
+    )
+    k_value = budget_factor(
+        severity=severity,
+        min_budget_factor=MIN_BUDGET_FACTOR,
+        emergency_severity=EMERGENCY_SEVERITY,
+    )
+    if pre_window_baseline > 0:
+        budget_base = pre_window_baseline
+    else:
+        budget_base = max(current_total, 1.0)
     budget = budget_base * k_value
 
     active_affected = [api for api in AFFECTED_APIS if api_rps(api, metric, rps) > 0]
     w_sum = sum(WEIGHTS.get(api, 1.0) for api in active_affected)
-    slew_rate = FAST_SLEW_RATE if fast_slew_left > 0 else NORMAL_SLEW_RATE
+    if severity >= EMERGENCY_SEVERITY:
+        slew_rate = EMERGENCY_SLEW_RATE
+    elif fast_slew_left > 0:
+        slew_rate = FAST_SLEW_RATE
+    else:
+        slew_rate = NORMAL_SLEW_RATE
+    floor_ratio = FLOOR_RATIO_EMERGENCY if severity >= EMERGENCY_SEVERITY else FLOOR_RATIO_BASE
 
     new_thresholds: ThresholdMap = {}
-    FLOOR_RATIO = 0.50
     for api in AFFECTED_APIS:
         curr = api_rps(api, metric, rps)
-        floor = max(pre_window_per_api.get(api, 0.0) * FLOOR_RATIO, MIN_THRESHOLD)
+        floor = max(pre_window_per_api.get(api, 0.0) * floor_ratio, MIN_THRESHOLD)
         if w_sum > 0 and api in active_affected:
             share = (WEIGHTS.get(api, 1.0) / w_sum) * budget
         else:
@@ -234,6 +306,8 @@ while True:
 
     thr_str = " ".join(f"{api}={new_thresholds[api]:.1f}" for api in ALL_APIS if api in new_thresholds)
     print(
-        f"[baca] t={elapsed:.0f}s severity={severity:.3f} k={k_value:.2f} "
-        f"budget={budget:.1f} base={budget_base:.1f} slew={slew_rate:.2f} | {thr_str}"
+        f"[baca] t={elapsed:.0f}s severity={severity:.3f} fail={fail_ratio:.3f} "
+        f"l95={affected_l95_max:.1f}ms drop={throughput_drop:.2f} "
+        f"k={k_value:.2f} budget={budget:.1f} base={budget_base:.1f} "
+        f"floor={floor_ratio:.2f} slew={slew_rate:.2f} | {thr_str}"
     )

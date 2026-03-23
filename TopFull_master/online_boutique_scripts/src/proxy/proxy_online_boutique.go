@@ -1,46 +1,46 @@
 package main
 
 import (
+	"bufio"
+	"encoding/json"
+	"fmt"
+	"github.com/elazarl/goproxy"
+	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
-	"syscall"
-	"bufio"
 	"strconv"
-	"io/ioutil"
 	"strings"
-	"time"
-	"fmt"
 	"sync"
-	"encoding/json"
-	"github.com/elazarl/goproxy"
+	"syscall"
+	"time"
 
 	"golang.org/x/time/rate"
 )
 
-
-
 var (
-	limiter = rate.NewLimiter(70, 70)
-	limitDir string
-	limiterTable = make(map[string]*rate.Limiter)
+	limiter            = rate.NewLimiter(70, 70)
+	limitDir           string
+	limiterTable       = make(map[string]*rate.Limiter)
 	global_config_path = os.ExpandEnv("$HOME/TopFullExt/TopFull_master/online_boutique_scripts/src/global_config.json")
-	global_config Config
-	mapStats = make(map[string]*StatsModule)
-	globalLock *sync.Mutex
+	global_config      Config
+	mapStats           = make(map[string]*StatsModule)
+	mapRejectStats     = make(map[string]*StatsModule)
+	globalLock         *sync.Mutex
 )
+
 type Config struct {
-	ProxyDir string `json:"proxy_dir"`
-	FrontendUrl string `json:"frontend_url"`
-	TargetAPI []string `json:"record_target"`
+	ProxyDir    string   `json:"proxy_dir"`
+	FrontendUrl string   `json:"frontend_url"`
+	TargetAPI   []string `json:"record_target"`
 }
 
 type StatsModule struct {
-	numReq map[int64]int64
+	numReq           map[int64]int64
 	lastReqTimestamp int64
-	startTimestamp int64
-	localLock *sync.Mutex
+	startTimestamp   int64
+	localLock        *sync.Mutex
 }
 
 func (stats *StatsModule) reset() {
@@ -57,13 +57,13 @@ func (stats *StatsModule) logRequest() {
 	num, ok := stats.numReq[currentTime]
 	if !ok {
 		stats.numReq[currentTime] = 1
-		} else {
-			stats.numReq[currentTime] = num + 1
-		}
-		stats.lastReqTimestamp = currentTime
+	} else {
+		stats.numReq[currentTime] = num + 1
 	}
-	
-	func (stats *StatsModule) currentRPS() float64 {
+	stats.lastReqTimestamp = currentTime
+}
+
+func (stats *StatsModule) currentRPS() float64 {
 	stats.localLock.Lock()
 	defer stats.localLock.Unlock()
 	if stats.lastReqTimestamp == 0 {
@@ -71,12 +71,12 @@ func (stats *StatsModule) logRequest() {
 	}
 	var startTime int64
 	currentTime := time.Now().Unix()
-	if  currentTime - 4 > stats.startTimestamp {
+	if currentTime-4 > stats.startTimestamp {
 		startTime = currentTime - 4
 	} else {
 		startTime = stats.startTimestamp
 	}
-	
+
 	var total int64
 	total = 0
 	for t := startTime; t < currentTime; t++ {
@@ -87,10 +87,10 @@ func (stats *StatsModule) logRequest() {
 			total += req
 		}
 	}
-	if currentTime - startTime == 0 {
+	if currentTime-startTime == 0 {
 		return 0
 	} else {
-		return float64(total) / float64(currentTime - startTime)
+		return float64(total) / float64(currentTime-startTime)
 	}
 }
 
@@ -104,15 +104,15 @@ func init() {
 
 	limitDir = global_config.ProxyDir
 
-	
 	for _, elem := range global_config.TargetAPI {
 		limiterTable[elem] = rate.NewLimiter(10000, 10000)
 		limiterTable[elem].SetBurst(10000)
 
 		mapStats[elem] = &StatsModule{}
 		mapStats[elem].reset()
+		mapRejectStats[elem] = &StatsModule{}
+		mapRejectStats[elem].reset()
 	}
-
 
 	globalLock = &sync.Mutex{}
 
@@ -129,7 +129,6 @@ func monitorRPS() {
 		}
 	}
 }
-
 
 func changeLimitDelta() {
 	dir, err := ioutil.ReadDir(limitDir)
@@ -150,7 +149,7 @@ func changeLimitDelta() {
 			os.Remove(limitDir + api)
 			continue
 		}
-		
+
 		targetLimiter, ok := limiterTable[api]
 		if !ok {
 			println("Wrong API")
@@ -164,14 +163,13 @@ func changeLimitDelta() {
 			os.Remove(limitDir + api)
 			continue
 		}
-		
+
 		targetLimiter.SetLimit(rate.Limit(newRateFloat))
 		targetLimiter.SetBurst(int(newRateFloat))
 		println("Apply threshold to ", api, " : ", newRateFloat)
 		os.Remove(limitDir + api)
 	}
 }
-
 
 func changeLimitAbs() {
 	dir, err := ioutil.ReadDir(limitDir)
@@ -195,14 +193,14 @@ func changeLimitAbs() {
 			print("Wrong rate")
 			continue
 		}
-		
+
 		targetLimiter, ok := limiterTable[api]
 		if !ok {
 			println("Wrong API")
 			os.Remove(limitDir + api)
 			continue
 		}
-		
+
 		targetLimiter.SetLimit(rate.Limit(float64(newRate)))
 		targetLimiter.SetBurst(int(newRate))
 		println("Apply threshold to ", api, " : ", newRate)
@@ -210,47 +208,30 @@ func changeLimitAbs() {
 	}
 }
 
-func RejectGetproduct(r *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
-	mapStats["getproduct"].logRequest()
-	if limiterTable["getproduct"].Allow() == false {
+func rejectByLimiter(api string, r *http.Request) (*http.Request, *http.Response) {
+	mapStats[api].logRequest()
+	if limiterTable[api].Allow() == false {
+		mapRejectStats[api].logRequest()
 		return r, goproxy.NewResponse(r, goproxy.ContentTypeText, http.StatusForbidden, "REJECT!")
-	} else {
-		return r, nil
 	}
-}
-func RejectPostcheckout(r *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
-	mapStats["postcheckout"].logRequest()
-	if limiterTable["postcheckout"].Allow() == false {
-		return r, goproxy.NewResponse(r, goproxy.ContentTypeText, http.StatusForbidden, "REJECT!")
-	} else {
-		return r, nil
-	}
-}
-func RejectGetcart(r *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
-	mapStats["getcart"].logRequest()
-	if limiterTable["getcart"].Allow() == false {
-		return r, goproxy.NewResponse(r, goproxy.ContentTypeText, http.StatusForbidden, "REJECT!")
-	} else {
-		return r, nil
-	}
-}
-func RejectPostcart(r *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
-	mapStats["postcart"].logRequest()
-	if limiterTable["postcart"].Allow() == false {
-		return r, goproxy.NewResponse(r, goproxy.ContentTypeText, http.StatusForbidden, "REJECT!")
-	} else {
-		return r, nil
-	}
-}
-func RejectEmptycart(r *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
-	mapStats["emptycart"].logRequest()
-	if limiterTable["emptycart"].Allow() == false {
-		return r, goproxy.NewResponse(r, goproxy.ContentTypeText, http.StatusForbidden, "REJECT!")
-	} else {
-		return r, nil
-	}
+	return r, nil
 }
 
+func RejectGetproduct(r *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
+	return rejectByLimiter("getproduct", r)
+}
+func RejectPostcheckout(r *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
+	return rejectByLimiter("postcheckout", r)
+}
+func RejectGetcart(r *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
+	return rejectByLimiter("getcart", r)
+}
+func RejectPostcart(r *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
+	return rejectByLimiter("postcart", r)
+}
+func RejectEmptycart(r *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
+	return rejectByLimiter("emptycart", r)
+}
 
 func ReqStat(r *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
 	target_apis := global_config.TargetAPI
@@ -260,7 +241,7 @@ func ReqStat(r *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Respo
 	}
 
 	return r, goproxy.NewResponse(r, goproxy.ContentTypeText, http.StatusOK, out)
-	
+
 }
 
 func ReqThreshold(r *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
@@ -272,43 +253,74 @@ func ReqThreshold(r *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.
 	return r, goproxy.NewResponse(r, goproxy.ContentTypeText, http.StatusOK, out)
 }
 
+func ReqFailStats(r *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
+	out := make(map[string]map[string]float64)
+	apis := global_config.TargetAPI
+	for _, elem := range apis {
+		total := mapStats[elem].currentRPS()
+		reject := mapRejectStats[elem].currentRPS()
+		if reject > total {
+			reject = total
+		}
+		accept := total - reject
+		if accept < 0 {
+			accept = 0
+		}
+		rejectRatio := 0.0
+		if total > 0 {
+			rejectRatio = reject / total
+		}
+		out[elem] = map[string]float64{
+			"total_rps":    total,
+			"reject_rps":   reject,
+			"accept_rps":   accept,
+			"reject_ratio": rejectRatio,
+		}
+	}
+	body, err := json.Marshal(out)
+	if err != nil {
+		return r, goproxy.NewResponse(r, goproxy.ContentTypeText, http.StatusOK, "{}")
+	}
+	return r, goproxy.NewResponse(r, goproxy.ContentTypeText, http.StatusOK, string(body))
+}
 
-
-
-var GetCartCondition goproxy.ReqConditionFunc = func (req *http.Request, ctx *goproxy.ProxyCtx) bool {
+var GetCartCondition goproxy.ReqConditionFunc = func(req *http.Request, ctx *goproxy.ProxyCtx) bool {
 	return req.URL.Host == global_config.FrontendUrl &&
-			req.Method == "GET"  &&
-			req.URL.Path == "/cart"
+		req.Method == "GET" &&
+		req.URL.Path == "/cart"
 }
-var PostCartCondition goproxy.ReqConditionFunc = func (req *http.Request, ctx *goproxy.ProxyCtx) bool {	
+var PostCartCondition goproxy.ReqConditionFunc = func(req *http.Request, ctx *goproxy.ProxyCtx) bool {
 	return req.URL.Host == global_config.FrontendUrl &&
-			req.Method == "POST"  &&
-			req.URL.Path == "/cart"
+		req.Method == "POST" &&
+		req.URL.Path == "/cart"
 }
-var PostCheckoutCondition goproxy.ReqConditionFunc = func (req *http.Request, ctx *goproxy.ProxyCtx) bool {
+var PostCheckoutCondition goproxy.ReqConditionFunc = func(req *http.Request, ctx *goproxy.ProxyCtx) bool {
 	return req.URL.Host == global_config.FrontendUrl &&
-			req.Method == "POST"  &&
-			req.URL.Path == "/cart/checkout"
+		req.Method == "POST" &&
+		req.URL.Path == "/cart/checkout"
 }
-var GetProductCondition goproxy.ReqConditionFunc = func (req *http.Request, ctx *goproxy.ProxyCtx) bool {
+var GetProductCondition goproxy.ReqConditionFunc = func(req *http.Request, ctx *goproxy.ProxyCtx) bool {
 	return req.URL.Host == global_config.FrontendUrl &&
-			req.Method == "GET"  &&
-			strings.Contains(req.URL.Path, "/product")
+		req.Method == "GET" &&
+		strings.Contains(req.URL.Path, "/product")
 }
-var EmptyCartCondition goproxy.ReqConditionFunc = func (req *http.Request, ctx *goproxy.ProxyCtx) bool {
+var EmptyCartCondition goproxy.ReqConditionFunc = func(req *http.Request, ctx *goproxy.ProxyCtx) bool {
 	return req.URL.Host == global_config.FrontendUrl &&
-			req.Method == "POST"  &&
-			req.URL.Path == "/cart/empty"
+		req.Method == "POST" &&
+		req.URL.Path == "/cart/empty"
 }
 
-
-var ReqStatCondition goproxy.ReqConditionFunc = func (req *http.Request, ctx *goproxy.ProxyCtx) bool {
-	return req.Method == "GET"  &&
-			strings.Contains(req.URL.Path, "/stats")
+var ReqStatCondition goproxy.ReqConditionFunc = func(req *http.Request, ctx *goproxy.ProxyCtx) bool {
+	return req.Method == "GET" &&
+		strings.Contains(req.URL.Path, "/stats")
 }
-var ReqThresholdCondition goproxy.ReqConditionFunc = func (req *http.Request, ctx *goproxy.ProxyCtx) bool {
-	return req.Method == "GET"  &&
-			strings.Contains(req.URL.Path, "/thresholds")
+var ReqThresholdCondition goproxy.ReqConditionFunc = func(req *http.Request, ctx *goproxy.ProxyCtx) bool {
+	return req.Method == "GET" &&
+		strings.Contains(req.URL.Path, "/thresholds")
+}
+var ReqFailStatsCondition goproxy.ReqConditionFunc = func(req *http.Request, ctx *goproxy.ProxyCtx) bool {
+	return req.Method == "GET" &&
+		strings.Contains(req.URL.Path, "/failstats")
 }
 
 func main() {
@@ -329,17 +341,15 @@ func main() {
 	proxy.Tr.MaxIdleConns = 50000
 	proxy.Tr.MaxIdleConnsPerHost = 50000
 
-
-
 	proxy.OnRequest(GetCartCondition).DoFunc(RejectGetcart)
 	proxy.OnRequest(GetProductCondition).DoFunc(RejectGetproduct)
 	proxy.OnRequest(PostCartCondition).DoFunc(RejectPostcart)
 	proxy.OnRequest(EmptyCartCondition).DoFunc(RejectEmptycart)
 	proxy.OnRequest(PostCheckoutCondition).DoFunc(RejectPostcheckout)
-	
 
 	proxy.OnRequest(ReqStatCondition).DoFunc(ReqStat)
 	proxy.OnRequest(ReqThresholdCondition).DoFunc(ReqThreshold)
+	proxy.OnRequest(ReqFailStatsCondition).DoFunc(ReqFailStats)
 	println("Start")
 	log.Fatal(http.ListenAndServe(":8090", proxy))
 }

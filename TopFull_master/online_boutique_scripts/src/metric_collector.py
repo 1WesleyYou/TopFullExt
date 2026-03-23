@@ -86,6 +86,35 @@ class Collector:
             result[name] = (result[name][0], result[name][1], result[name][2], result[name][3])
         return result
 
+    def query_proxy_failstats(self):
+        proxies = {
+            "http": global_config["proxy_url"]
+        }
+        url = global_config["proxy_url"] + "/failstats"
+        try:
+            response = requests.get(url, proxies=proxies, timeout=3)
+        except Exception:
+            return {}
+        if not response.ok:
+            return {}
+        try:
+            data = response.json()
+        except Exception:
+            try:
+                data = json.loads(response.text)
+            except Exception:
+                return {}
+        result = {}
+        for api, payload in data.items():
+            if not isinstance(payload, dict):
+                continue
+            total_rps = float(payload.get("total_rps", 0.0))
+            reject_rps = float(payload.get("reject_rps", 0.0))
+            accept_rps = float(payload.get("accept_rps", max(total_rps - reject_rps, 0.0)))
+            reject_ratio = float(payload.get("reject_ratio", (reject_rps / total_rps) if total_rps > 0 else 0.0))
+            result[api] = (total_rps, reject_rps, accept_rps, reject_ratio)
+        return result
+
     
     def query_latency(self, api):
         response = requests.get(f"http://honey3.kaist.ac.kr:8089/stats/requests")
@@ -165,6 +194,23 @@ def record_online_boutique():
         with open(filename, "a") as f:
             w = csv.writer(f)
             w.writerow(["RPS", "Fail", "Goodput", "Latency95", "Latency99"])
+
+        fail_breakdown_file = log_path + api + "_fail_breakdown.csv"
+        if os.path.exists(fail_breakdown_file):
+            os.remove(fail_breakdown_file)
+        with open(fail_breakdown_file, "a") as f:
+            w = csv.writer(f)
+            w.writerow([
+                "RawFail",
+                "RejectFail",
+                "TimeoutFailEst",
+                "RejectShareInFail",
+                "TimeoutShareInFail",
+                "ProxyTotalRPS",
+                "ProxyAcceptRPS",
+                "ProxyRejectRPS",
+                "ProxyRejectRatio",
+            ])
     
     filename = log_path + "total.csv"
     if os.path.exists(filename):
@@ -173,15 +219,38 @@ def record_online_boutique():
         w = csv.writer(f)
         w.writerow(["RPS", "Fail", "Goodput", "Latency95", "Latency99"])
 
+    fail_total_file = log_path + "total_fail_breakdown.csv"
+    if os.path.exists(fail_total_file):
+        os.remove(fail_total_file)
+    with open(fail_total_file, "a") as f:
+        w = csv.writer(f)
+        w.writerow([
+            "RawFail",
+            "RejectFail",
+            "TimeoutFailEst",
+            "RejectShareInFail",
+            "TimeoutShareInFail",
+            "ProxyTotalRPS",
+            "ProxyAcceptRPS",
+            "ProxyRejectRPS",
+            "ProxyRejectRatio",
+        ])
+
 
     while True:
         time.sleep(1)
         metric = c.query()
+        fail_stats = c.query_proxy_failstats()
         total_goodput = {}
         total_rps = 0
         total_fail = 0
         total_latency95 = 0
         total_latency99 = 0
+        total_reject_fail = 0
+        total_timeout_fail = 0
+        total_proxy_total_rps = 0
+        total_proxy_accept_rps = 0
+        total_proxy_reject_rps = 0
 
         for i, api in enumerate(apis):
             if api not in metric:
@@ -199,16 +268,56 @@ def record_online_boutique():
             total_fail += fail
             total_latency95 += latency95
             total_latency99 += latency99
+            proxy_total_rps, proxy_reject_rps, proxy_accept_rps, proxy_reject_ratio = fail_stats.get(api, (0.0, 0.0, 0.0, 0.0))
+            reject_fail = min(max(proxy_reject_rps, 0.0), fail)
+            timeout_fail = max(fail - reject_fail, 0.0)
+            reject_share = (reject_fail / fail) if fail > 0 else 0.0
+            timeout_share = (timeout_fail / fail) if fail > 0 else 0.0
+            total_reject_fail += reject_fail
+            total_timeout_fail += timeout_fail
+            total_proxy_total_rps += proxy_total_rps
+            total_proxy_accept_rps += proxy_accept_rps
+            total_proxy_reject_rps += proxy_reject_rps
             with open(log_path + api + ".csv", "a") as f:
                 w = csv.writer(f)
                 w.writerow([rps, fail, rps-fail, latency95, latency99])
                 total_goodput[api] = rps-fail
+            with open(log_path + api + "_fail_breakdown.csv", "a") as f:
+                w = csv.writer(f)
+                w.writerow([
+                    fail,
+                    reject_fail,
+                    timeout_fail,
+                    reject_share,
+                    timeout_share,
+                    proxy_total_rps,
+                    proxy_accept_rps,
+                    proxy_reject_rps,
+                    proxy_reject_ratio,
+                ])
         with open(log_path + "total.csv", "a") as f:
             w = csv.writer(f)
             w.writerow([total_rps, total_fail, total_rps-total_fail, total_latency95/len(apis), total_latency99/len(apis)])
+        total_reject_ratio = (total_proxy_reject_rps / total_proxy_total_rps) if total_proxy_total_rps > 0 else 0.0
+        total_reject_share = (total_reject_fail / total_fail) if total_fail > 0 else 0.0
+        total_timeout_share = (total_timeout_fail / total_fail) if total_fail > 0 else 0.0
+        with open(fail_total_file, "a") as f:
+            w = csv.writer(f)
+            w.writerow([
+                total_fail,
+                total_reject_fail,
+                total_timeout_fail,
+                total_reject_share,
+                total_timeout_share,
+                total_proxy_total_rps,
+                total_proxy_accept_rps,
+                total_proxy_reject_rps,
+                total_reject_ratio,
+            ])
         out = ""
         for api in apis:
             out += f"{api}={total_goodput[api]}   "
+        out += f"| fail(raw/reject/timeout-est)={total_fail:.1f}/{total_reject_fail:.1f}/{total_timeout_fail:.1f}"
         print(out)
 
 
