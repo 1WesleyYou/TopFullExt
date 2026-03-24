@@ -70,6 +70,8 @@ push_runtime_file "${MASTER_REPO_DIR}" "TopFull_master/online_boutique_scripts/s
 ssh "${MASTER_TARGET}" bash -s -- \
   "${MASTER_REPO_DIR}" \
   "${NET_DELAY_MS:-0}" \
+  "${EMPTYCART_DELAY_MS:-${NET_DELAY_MS:-0}}" \
+  "${POSTCART_DELAY_MS:-${NET_DELAY_MS:-0}}" \
   "${NET_JITTER_MS:-0}" \
   "${NET_INJECT_AT_SEC:-0}" \
   "${NET_RELEASE_AT_SEC:-0}" \
@@ -77,9 +79,11 @@ ssh "${MASTER_TARGET}" bash -s -- \
 set -euo pipefail
 repo_dir="${1:?repo_dir required}"
 net_delay_ms="${2:-0}"
-net_jitter_ms="${3:-0}"
-net_inject_at_sec="${4:-0}"
-net_release_at_sec="${5:-0}"
+emptycart_delay_ms="${3:-0}"
+postcart_delay_ms="${4:-0}"
+net_jitter_ms="${5:-0}"
+net_inject_at_sec="${6:-0}"
+net_release_at_sec="${7:-0}"
 src_dir="${repo_dir}/TopFull_master/online_boutique_scripts/src"
 
 cd "${src_dir}"
@@ -96,7 +100,7 @@ tmux kill-session -t topfull-train 2>/dev/null || true
 : > /tmp/topfull-metrics.log
 : > /tmp/topfull-train.log
 
-tmux new-session -d -s topfull-proxy "ulimit -n 65535 || true; cd '${src_dir}/proxy' && NET_DELAY_MS=${net_delay_ms} NET_JITTER_MS=${net_jitter_ms} NET_INJECT_AT_SEC=${net_inject_at_sec} NET_RELEASE_AT_SEC=${net_release_at_sec} go run proxy_online_boutique.go > /tmp/topfull-proxy.log 2>&1"
+tmux new-session -d -s topfull-proxy "ulimit -n 65535 || true; cd '${src_dir}/proxy' && NET_DELAY_MS=${net_delay_ms} EMPTYCART_DELAY_MS=${emptycart_delay_ms} POSTCART_DELAY_MS=${postcart_delay_ms} NET_JITTER_MS=${net_jitter_ms} NET_INJECT_AT_SEC=${net_inject_at_sec} NET_RELEASE_AT_SEC=${net_release_at_sec} go run proxy_online_boutique.go > /tmp/topfull-proxy.log 2>&1"
 tmux new-session -d -s topfull-metrics "cd '${src_dir}' && python3 metric_collector.py > /tmp/topfull-metrics.log 2>&1"
 tmux new-session -d -s topfull-train "cd '${src_dir}' && PYTHONUNBUFFERED=1 python3 transfer_learning.py > /tmp/topfull-train.log 2>&1"
 
