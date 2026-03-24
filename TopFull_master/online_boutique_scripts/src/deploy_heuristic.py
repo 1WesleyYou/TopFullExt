@@ -9,7 +9,7 @@ import csv
 import json
 import os
 import time
-from typing import Dict, List, Tuple
+from typing import Dict, List, Set, Tuple
 
 import requests
 
@@ -228,6 +228,10 @@ WEIGHTS: Dict[str, float] = {
     "getproduct": _env_float("BACA_WEIGHT_GETPRODUCT", _dot_env, 2.0),
     "postcart": _env_float("BACA_WEIGHT_POSTCART", _dot_env, 1.0),
 }
+# Priority APIs to protect first under degradation (always-on policy).
+PRIORITY_CANDIDATES: Tuple[str, str] = ("getcart", "getproduct")
+PRIORITY_APIS: List[str] = [api for api in PRIORITY_CANDIDATES if api in AFFECTED_APIS]
+NON_PRIORITY_APIS: List[str] = [a for a in AFFECTED_APIS if a not in PRIORITY_APIS]
 
 HEUC_ENABLE = _env_bool("BACA_HEUC_ENABLE", _dot_env, True)
 HIGH_THRESHOLD = _env_float("BACA_HIGH_THRESHOLD", _dot_env, 10000.0)
@@ -280,6 +284,34 @@ SLEW_BY_MODE = {
 SHOCK_CYCLES = _env_int("BACA_SHOCK_CYCLES", _dot_env, 3)
 SHOCK_FACTOR = _env_float("BACA_SHOCK_FACTOR", _dot_env, 0.68)
 
+# Priority allocation controls (medium-intrusion policy).
+PRIORITY_RESERVE_BY_MODE = {
+    MODE_NORMAL: _env_float("BACA_PRIORITY_RESERVE_NORMAL", _dot_env, 0.25),
+    MODE_PROTECTIVE: _env_float("BACA_PRIORITY_RESERVE_PROTECTIVE", _dot_env, 0.40),
+    MODE_EMERGENCY: _env_float("BACA_PRIORITY_RESERVE_EMERGENCY", _dot_env, 0.60),
+    MODE_RECOVERY: _env_float("BACA_PRIORITY_RESERVE_RECOVERY", _dot_env, 0.45),
+}
+PRIORITY_FLOOR_MULT_BY_MODE = {
+    MODE_NORMAL: _env_float("BACA_PRIORITY_FLOOR_MULT_NORMAL", _dot_env, 1.15),
+    MODE_PROTECTIVE: _env_float("BACA_PRIORITY_FLOOR_MULT_PROTECTIVE", _dot_env, 1.30),
+    MODE_EMERGENCY: _env_float("BACA_PRIORITY_FLOOR_MULT_EMERGENCY", _dot_env, 1.55),
+    MODE_RECOVERY: _env_float("BACA_PRIORITY_FLOOR_MULT_RECOVERY", _dot_env, 1.35),
+}
+PRIORITY_URG_MULT_BY_MODE = {
+    MODE_NORMAL: _env_float("BACA_PRIORITY_URG_MULT_NORMAL", _dot_env, 1.20),
+    MODE_PROTECTIVE: _env_float("BACA_PRIORITY_URG_MULT_PROTECTIVE", _dot_env, 1.60),
+    MODE_EMERGENCY: _env_float("BACA_PRIORITY_URG_MULT_EMERGENCY", _dot_env, 2.20),
+    MODE_RECOVERY: _env_float("BACA_PRIORITY_URG_MULT_RECOVERY", _dot_env, 1.80),
+}
+NON_PRIORITY_MAX_SHARE_BY_MODE = {
+    MODE_NORMAL: _env_float("BACA_NON_PRIORITY_MAX_SHARE_NORMAL", _dot_env, 1.00),
+    MODE_PROTECTIVE: _env_float("BACA_NON_PRIORITY_MAX_SHARE_PROTECTIVE", _dot_env, 0.60),
+    MODE_EMERGENCY: _env_float("BACA_NON_PRIORITY_MAX_SHARE_EMERGENCY", _dot_env, 0.20),
+    MODE_RECOVERY: _env_float("BACA_NON_PRIORITY_MAX_SHARE_RECOVERY", _dot_env, 0.45),
+}
+RECOVERY_HOLD_CYCLES = _env_int("BACA_RECOVERY_HOLD_CYCLES", _dot_env, 6)
+RECOVERY_HOLD_NON_PRIORITY_CAP = _env_float("BACA_RECOVERY_HOLD_NON_PRIORITY_CAP", _dot_env, 0.10)
+
 collector = Collector(code=global_config["microservice_code"])
 log_path = global_config["record_path"]
 os.makedirs(log_path, exist_ok=True)
@@ -304,11 +336,13 @@ mode_counters = {
     "recovery_to_protect": 0,
 }
 shock_left = 0
+recovery_hold_left = 0
 
 print("[heuc] HEU-C started")
 print(f"[heuc] bottleneck service: {BOTTLENECK_SVC}")
 print(f"[heuc] affected APIs: {AFFECTED_APIS}")
 print(f"[heuc] safe APIs: {SAFE_APIS}")
+print(f"[heuc] priority APIs: {PRIORITY_APIS}, non-priority APIs: {NON_PRIORITY_APIS}")
 print(f"[heuc] enabled: window [{GATE_START}s, {GATE_END}s], heuc_enable={HEUC_ENABLE}")
 print(
     "[heuc] params: "
@@ -317,6 +351,8 @@ print(
     f"{FLOOR_BY_MODE[MODE_EMERGENCY]:.2f}/{FLOOR_BY_MODE[MODE_RECOVERY]:.2f}), "
     f"slew(N/P/E/R)=({SLEW_BY_MODE[MODE_NORMAL]:.2f}/{SLEW_BY_MODE[MODE_PROTECTIVE]:.2f}/"
     f"{SLEW_BY_MODE[MODE_EMERGENCY]:.2f}/{SLEW_BY_MODE[MODE_RECOVERY]:.2f}), "
+    f"prio_reserve(N/P/E/R)=({PRIORITY_RESERVE_BY_MODE[MODE_NORMAL]:.2f}/{PRIORITY_RESERVE_BY_MODE[MODE_PROTECTIVE]:.2f}/"
+    f"{PRIORITY_RESERVE_BY_MODE[MODE_EMERGENCY]:.2f}/{PRIORITY_RESERVE_BY_MODE[MODE_RECOVERY]:.2f}), "
     f"shock(cycles={SHOCK_CYCLES},factor={SHOCK_FACTOR:.2f})"
 )
 
@@ -423,8 +459,13 @@ while True:
             mode_counters[k] = 0
         if mode == MODE_EMERGENCY:
             shock_left = SHOCK_CYCLES
+            recovery_hold_left = 0
+        elif mode == MODE_RECOVERY and old_mode == MODE_EMERGENCY:
+            recovery_hold_left = RECOVERY_HOLD_CYCLES
         elif old_mode == MODE_EMERGENCY:
             shock_left = 0
+        elif mode != MODE_RECOVERY:
+            recovery_hold_left = 0
         print(f"[heuc] t={elapsed:.0f}s mode {old_mode} -> {mode} ({reason})")
 
     # Budget from baseline capacity.
@@ -435,10 +476,17 @@ while True:
     floor_ratio = FLOOR_BY_MODE.get(mode, FLOOR_BY_MODE[MODE_NORMAL])
     slew_rate = SLEW_BY_MODE.get(mode, SLEW_BY_MODE[MODE_NORMAL])
 
+    priority_set: Set[str] = set(PRIORITY_APIS)
+    non_priority_set: Set[str] = set(a for a in AFFECTED_APIS if a not in priority_set)
+    priority_floor_mult = PRIORITY_FLOOR_MULT_BY_MODE.get(mode, 1.0)
+
     floors: Dict[str, float] = {}
     for api in AFFECTED_APIS:
         floor_baseline = pre_window_per_api.get(api, 0.0)
-        floors[api] = max(MIN_THRESHOLD, floor_ratio * floor_baseline)
+        base_floor = max(MIN_THRESHOLD, floor_ratio * floor_baseline)
+        if api in priority_set:
+            base_floor = max(base_floor, base_floor * priority_floor_mult)
+        floors[api] = base_floor
     floor_sum = sum(floors.values())
     residual_budget = max(budget - floor_sum, 0.0)
 
@@ -446,6 +494,7 @@ while True:
     timeout_norm = normalize_positive({api: s["timeout_est"] for api, s in signals.items()})
     lat_norm = normalize_positive({api: s["lat_excess"] for api, s in signals.items()})
     drop_norm = normalize_positive({api: s["drop"] for api, s in signals.items()})
+    priority_urg_mult = PRIORITY_URG_MULT_BY_MODE.get(mode, 1.0)
     urgency: Dict[str, float] = {}
     for api in AFFECTED_APIS:
         base_u = (
@@ -455,13 +504,59 @@ while True:
         )
         if base_u <= 0.0:
             base_u = 1.0
-        urgency[api] = WEIGHTS.get(api, 1.0) * base_u
+        weighted = WEIGHTS.get(api, 1.0) * base_u
+        if api in priority_set:
+            weighted *= priority_urg_mult
+        urgency[api] = weighted
     urgency_sum = sum(urgency.values())
+
+    # Stage-A: reserve part of residual for priority APIs.
+    priority_reserve_ratio = PRIORITY_RESERVE_BY_MODE.get(mode, 0.0) if priority_set else 0.0
+    priority_reserve = residual_budget * clamp(priority_reserve_ratio, 0.0, 1.0)
+    general_budget = max(residual_budget - priority_reserve, 0.0)
+    shares: Dict[str, float] = {api: 0.0 for api in AFFECTED_APIS}
+
+    if general_budget > 0 and urgency_sum > 0:
+        for api in AFFECTED_APIS:
+            shares[api] += general_budget * urgency[api] / urgency_sum
+
+    if priority_reserve > 0 and priority_set:
+        priority_urg_sum = sum(urgency.get(api, 0.0) for api in priority_set)
+        if priority_urg_sum > 0:
+            for api in priority_set:
+                shares[api] += priority_reserve * urgency.get(api, 0.0) / priority_urg_sum
+        else:
+            even_share = priority_reserve / max(len(priority_set), 1)
+            for api in priority_set:
+                shares[api] += even_share
+
+    # Stage-B guardrail: cap non-priority residual share in harsh modes.
+    non_priority_cap_ratio = NON_PRIORITY_MAX_SHARE_BY_MODE.get(mode, 1.0)
+    if mode == MODE_RECOVERY and recovery_hold_left > 0:
+        non_priority_cap_ratio = min(non_priority_cap_ratio, RECOVERY_HOLD_NON_PRIORITY_CAP)
+    if non_priority_set and residual_budget > 0:
+        non_priority_cap_total = residual_budget * clamp(non_priority_cap_ratio, 0.0, 1.0)
+        non_priority_alloc = sum(shares.get(api, 0.0) for api in non_priority_set)
+        if non_priority_alloc > non_priority_cap_total:
+            scale = non_priority_cap_total / non_priority_alloc if non_priority_alloc > 0 else 0.0
+            reclaimed = 0.0
+            for api in non_priority_set:
+                prev_alloc = shares.get(api, 0.0)
+                shares[api] = prev_alloc * scale
+                reclaimed += prev_alloc - shares[api]
+            if reclaimed > 0 and priority_set:
+                priority_urg_sum = sum(urgency.get(api, 0.0) for api in priority_set)
+                if priority_urg_sum > 0:
+                    for api in priority_set:
+                        shares[api] += reclaimed * urgency.get(api, 0.0) / priority_urg_sum
+                else:
+                    even_share = reclaimed / max(len(priority_set), 1)
+                    for api in priority_set:
+                        shares[api] += even_share
 
     new_thresholds: ThresholdMap = {}
     for api in AFFECTED_APIS:
-        share = residual_budget * urgency[api] / urgency_sum if urgency_sum > 0 else 0.0
-        target = floors[api] + share
+        target = floors[api] + shares.get(api, 0.0)
 
         # Emergency shock: aggressively suppress queue growth for first few rounds.
         if mode == MODE_EMERGENCY and shock_left > 0:
@@ -484,6 +579,8 @@ while True:
     prev_thresholds = dict(new_thresholds)
     if mode == MODE_EMERGENCY and shock_left > 0:
         shock_left -= 1
+    if mode == MODE_RECOVERY and recovery_hold_left > 0:
+        recovery_hold_left -= 1
     was_in_window = True
 
     thr_str = " ".join(f"{api}={new_thresholds[api]:.1f}" for api in ALL_APIS if api in new_thresholds)
@@ -492,5 +589,6 @@ while True:
         f"fail={fail_ratio:.3f} reject={affected_reject/max(affected_rps,1e-6):.3f} "
         f"timeout_share={timeout_share:.3f} l95={affected_l95_max:.1f}ms drop={throughput_drop:.2f} "
         f"k={k_value:.2f} budget={budget:.1f}/{budget_base:.1f} floor_sum={floor_sum:.1f} "
-        f"residual={residual_budget:.1f} slew={slew_rate:.2f} shock_left={shock_left} | {thr_str}"
+        f"residual={residual_budget:.1f} prio_reserve={priority_reserve:.1f} nonprio_cap={non_priority_cap_ratio:.2f} "
+        f"slew={slew_rate:.2f} shock_left={shock_left} rec_hold={recovery_hold_left} | {thr_str}"
     )
