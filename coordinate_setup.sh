@@ -2,16 +2,19 @@
 set -euo pipefail
 
 # Coordinate cluster setup from one machine:
-# 1) Ensure repo exists on node0/node1/node2 via git clone/pull
+# 1) Ensure repo exists on all nodes via git clone/pull
 # 2) Optionally push local .env to all nodes via scp
-# 3) Run setup.sh master on node0
-# 4) Get join command from node0 and run setup.sh worker on node1
+# 3) Run setup.sh master on node0, untaint control-plane
+# 4) Get join command and run setup.sh worker on each WORKER_NODES entry
 #
 # Usage:
 #   ./coordinate_setup.sh
 #
 # Optional env overrides:
-#   MASTER_NODE / WORKER_NODE / LOADGEN_NODE   (default: node0 / node1 / node2)
+#   MASTER_NODE                 (default: node0)
+#   WORKER_NODES                (space-separated worker list, default: "node1")
+#   WORKER_NODE                 (legacy single-worker fallback)
+#   LOADGEN_NODE                (default: node3)
 #   SSH_USER                    (default: current user)
 #   PROJECT_NAME                (default: TopFullExt)
 #   REMOTE_REPO_DIR             (default: $HOME/$PROJECT_NAME on remote)
@@ -34,8 +37,12 @@ if [[ -f "${ENV_FILE}" ]]; then
 fi
 
 MASTER_HOST="${MASTER_NODE:-node0}"
-WORKER_HOST="${WORKER_NODE:-node1}"
-LOADGEN_HOST="${LOADGEN_NODE:-node2}"
+if [[ -n "${WORKER_NODES:-}" ]]; then
+	read -ra WORKER_HOSTS <<< "${WORKER_NODES}"
+else
+	WORKER_HOSTS=("${WORKER_NODE:-node1}")
+fi
+LOADGEN_HOST="${LOADGEN_NODE:-node3}"
 SSH_USER="${SSH_USER:-}"
 PROJECT_NAME="${PROJECT_NAME:-TopFullExt}"
 REMOTE_REPO_DIR="${REMOTE_REPO_DIR:-}"
@@ -210,6 +217,13 @@ kubectl apply -f "${repo_dir}/TopFull_master/online_boutique_scripts/deployments
 kubectl apply -f "${repo_dir}/TopFull_master/online_boutique_scripts/deployments/metric-server-latest.yaml"
 python3 "${src_dir}/instance_scaling.py"
 
+echo "Waiting for all pods to become Ready after scaling..."
+kubectl wait --for=condition=Ready pods --all -n default --timeout=180s
+
+echo "Rolling restart frontend to rebalance gRPC connections..."
+kubectl rollout restart deployment frontend -n default
+kubectl rollout status deployment frontend -n default --timeout=120s
+
 tmux kill-session -t topfull-proxy >/dev/null 2>&1 || true
 tmux kill-session -t topfull-controller >/dev/null 2>&1 || true
 tmux kill-session -t topfull-metrics >/dev/null 2>&1 || true
@@ -304,7 +318,8 @@ detect_master_ip() {
 
 preflight_netem_deps() {
 	local master_target="$1"
-	local worker_target="$2"
+	shift
+	local worker_targets=("$@")
 
 	log "Pre-flight: checking tc/netem dependencies on cluster nodes"
 
@@ -315,7 +330,8 @@ preflight_netem_deps() {
 		ok=0
 	fi
 
-	for node_target in "${master_target}" "${worker_target}"; do
+	local all_targets=("${master_target}" "${worker_targets[@]}")
+	for node_target in "${all_targets[@]}"; do
 		for cmd in tc nsenter; do
 			if ! ssh "${node_target}" "command -v ${cmd} >/dev/null 2>&1"; then
 				log "WARN: ${cmd} not found on ${node_target}, installing iproute2 + util-linux..."
@@ -332,24 +348,22 @@ preflight_netem_deps() {
 }
 
 main() {
-	local master_target worker_target loadgen_target
-	local master_repo_dir worker_repo_dir loadgen_repo_dir
+	local master_target loadgen_target
+	local master_repo_dir loadgen_repo_dir
 	local master_log join_cmd
 	local master_ip_for_deploy
 
 	master_target="$(target_host "${MASTER_HOST}")"
-	worker_target="$(target_host "${WORKER_HOST}")"
 	loadgen_target="$(target_host "${LOADGEN_HOST}")"
 	master_ip_for_deploy=""
 	master_log="$(mktemp)"
 	trap "rm -f '${master_log}'" EXIT
 
 	log "Coordinating setup via SSH"
-	log "Master: ${master_target}, Worker: ${worker_target}, Loadgen: ${loadgen_target}"
+	log "Master: ${master_target}, Workers: ${WORKER_HOSTS[*]}, Loadgen: ${loadgen_target}"
 	log "Repo: ${REPO_URL}, Branch: ${BRANCH}"
 
 	master_repo_dir="$(resolve_remote_repo_dir "${master_target}")"
-	worker_repo_dir="$(resolve_remote_repo_dir "${worker_target}")"
 	loadgen_repo_dir="$(resolve_remote_repo_dir "${loadgen_target}")"
 
 	log "Step 0/3: prepare repo + .env on nodes"
@@ -357,9 +371,14 @@ main() {
 	push_env_to_node "${master_target}" "${master_repo_dir}"
 	push_setup_scripts_to_node "${master_target}" "${master_repo_dir}"
 
-	ensure_repo_on_node "${worker_target}" "${worker_repo_dir}"
-	push_env_to_node "${worker_target}" "${worker_repo_dir}"
-	push_setup_scripts_to_node "${worker_target}" "${worker_repo_dir}"
+	for worker_host in "${WORKER_HOSTS[@]}"; do
+		local wt wr
+		wt="$(target_host "${worker_host}")"
+		wr="$(resolve_remote_repo_dir "${wt}")"
+		ensure_repo_on_node "${wt}" "${wr}"
+		push_env_to_node "${wt}" "${wr}"
+		push_setup_scripts_to_node "${wt}" "${wr}"
+	done
 
 	if [[ "${SKIP_LOADGEN_PREP}" != "1" ]]; then
 		ensure_repo_on_node "${loadgen_target}" "${loadgen_repo_dir}"
@@ -372,18 +391,31 @@ main() {
 	log "Step 1/3: setup master on ${master_target}"
 	run_setup_master "${master_target}" "${master_repo_dir}" "${master_log}"
 
+	log "Removing control-plane taint so master can schedule workloads"
+	ssh "${master_target}" "sudo KUBECONFIG=/etc/kubernetes/admin.conf kubectl taint nodes --all node-role.kubernetes.io/control-plane:NoSchedule- 2>/dev/null || true"
+
 	join_cmd="$(sed -n 's/^__JOIN_CMD__=//p' "${master_log}" | tail -n 1)"
 	if [[ -z "${join_cmd}" ]]; then
 		echo "Failed to capture join command from master setup output."
 		exit 1
 	fi
 
-	log "Step 2/3: setup worker on ${worker_target}"
-	run_setup_worker "${worker_target}" "${worker_repo_dir}" "${join_cmd}"
+	log "Step 2/3: setup workers (${WORKER_HOSTS[*]})"
+	for worker_host in "${WORKER_HOSTS[@]}"; do
+		local wt wr
+		wt="$(target_host "${worker_host}")"
+		wr="$(resolve_remote_repo_dir "${wt}")"
+		log "Joining worker ${worker_host}..."
+		run_setup_worker "${wt}" "${wr}" "${join_cmd}"
+	done
 
 	log "Done. Cluster bootstrap flow completed."
 
-	preflight_netem_deps "${master_target}" "${worker_target}"
+	local worker_targets=()
+	for worker_host in "${WORKER_HOSTS[@]}"; do
+		worker_targets+=("$(target_host "${worker_host}")")
+	done
+	preflight_netem_deps "${master_target}" "${worker_targets[@]}"
 
 	master_ip_for_deploy="$(detect_master_ip "${master_target}")"
 	if [[ -z "${master_ip_for_deploy}" ]]; then

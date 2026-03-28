@@ -20,7 +20,7 @@ target_host() {
   fi
 }
 
-LOADGEN_TARGET="$(target_host "${LOADGEN_NODE:-node2}")"
+LOADGEN_TARGET="$(target_host "${LOADGEN_NODE:-node3}")"
 PROJECT_NAME="${PROJECT_NAME:-TopFullExt}"
 MASTER_IP_VALUE="${MASTER_IP:-}"
 INJECT_DURATION="${1:-${INJECT_DURATION:-15m}}"

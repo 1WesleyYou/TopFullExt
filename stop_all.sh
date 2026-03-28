@@ -17,7 +17,7 @@ if [[ -f "${ENV_FILE}" ]]; then
 fi
 
 MASTER_HOST="${MASTER_NODE:-node0}"
-LOADGEN_HOST="${LOADGEN_NODE:-node2}"
+LOADGEN_HOST="${LOADGEN_NODE:-node3}"
 SSH_USER="${SSH_USER:-}"
 
 target_host() {

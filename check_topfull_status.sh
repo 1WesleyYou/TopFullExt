@@ -16,7 +16,7 @@ if [[ -f "${ENV_FILE}" ]]; then
 fi
 
 MASTER_HOST="${MASTER_NODE:-node0}"
-LOADGEN_HOST="${LOADGEN_NODE:-node2}"
+LOADGEN_HOST="${LOADGEN_NODE:-node3}"
 SSH_USER="${SSH_USER:-}"
 MASTER_IP_VALUE="${MASTER_IP:-}"
 FRONTEND_NODEPORT="${FRONTEND_NODEPORT:-30440}"
@@ -55,10 +55,10 @@ main() {
   section "TopFull Runtime (master)"
   ssh "${master_target}" "tmux ls 2>/dev/null | egrep 'topfull-proxy|topfull-controller|topfull-metrics|topfull-loadgen' || echo 'no topfull tmux session found'; echo; pgrep -af 'proxy_online_boutique|deploy_rl.py|deploy_mimd.py|deploy_without_cluster.py|metric_collector.py' || echo 'no topfull process found'"
 
-  section "Loadgen Runtime (node2)"
+  section "Loadgen Runtime (${LOADGEN_HOST})"
   ssh "${loadgen_target}" "tmux ls 2>/dev/null | egrep 'topfull-loadgen|session1|session2|session3' || echo 'no loadgen tmux session found'; echo; pgrep -af locust >/dev/null && echo 'locust process: running' || echo 'locust process: not running'"
 
-  section "Loadgen Target Config (node2)"
+  section "Loadgen Target Config (${LOADGEN_HOST})"
   ssh "${loadgen_target}" "python3 - <<'PY'
 from pathlib import Path
 import re

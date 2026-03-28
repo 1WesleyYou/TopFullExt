@@ -29,7 +29,7 @@ target_host() {
   fi
 }
 
-LOADGEN_TARGET="$(target_host "${LOADGEN_NODE:-node2}")"
+LOADGEN_TARGET="$(target_host "${LOADGEN_NODE:-node3}")"
 MASTER_TARGET="$(target_host "${MASTER_NODE:-node0}")"
 PROJECT_NAME="${PROJECT_NAME:-TopFullExt}"
 MASTER_IP_VALUE="${MASTER_IP:-}"
