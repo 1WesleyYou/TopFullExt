@@ -1,16 +1,16 @@
 #!/bin/bash
-GETPRODUCT=6100
-POSTCHECKOUT=370
+GETPRODUCT=3660
+POSTCHECKOUT=222
 GETCART=5000
 POSTCART=2600
-CART=9000
-RATE=90
+CART=5400
+RATE=54
 
 tmux kill-session -t session2
 tmux new-session -d -s session2
 
 
-tmux new-window -d -t session2 "locust -f locust_online_boutique.py --host=http://10.8.0.4:30440 --tags postcheckout --master-bind-port=8881  --master --expect-workers=10 --headless -u $POSTCHECKOUT -r $((POSTCHECKOUT / RATE)) -t 15m  < ports/8886"
+tmux new-window -d -t session2 "locust -f locust_online_boutique.py --host=http://10.8.0.4:30440 --tags postcheckout --master-bind-port=8881  --master --expect-workers=10 --headless -u $POSTCHECKOUT -r $(( (POSTCHECKOUT / RATE) > 0 ? (POSTCHECKOUT / RATE) : 1 )) -t 15m  < ports/8886"
 for i in $(seq 1 10)
 do
     tmux new-window -d -t session2 "locust -f locust_online_boutique.py --host=http://10.8.0.4:30440 --tags postcheckout --worker --master-port=8881  --master-host=127.0.0.1 < ports/$((i+8907))"
