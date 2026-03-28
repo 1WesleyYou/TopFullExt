@@ -4,7 +4,7 @@
     "proxy_dir": "$HOME/TopFullExt/TopFull_master/online_boutique_scripts/src/proxy/rate_config/",
     "microservice_configuration": "$HOME/TopFullExt/TopFull_master/online_boutique_scripts/src/config/online_boutique.json",
     "proxy_url": "http://10.10.1.1:8090",
-    "locust_url": "http://10.10.1.3",
+    "locust_url": "http://10.10.1.4",
     "locust_port": 43,
     "record_target": ["getcart", "getproduct", "postcheckout", "postcart", "emptycart"],
     "record_path": "$HOME/TopFullExt/TopFull_master/online_boutique_scripts/src/logs/",
