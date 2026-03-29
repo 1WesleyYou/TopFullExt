@@ -15,6 +15,7 @@ You can configure observation targets by modifying 'service_list'
 """
 
 import json
+import os
 import requests
 import redis
 import timeit
@@ -41,6 +42,8 @@ service_list = ["redis-cart", "frontend", "checkoutservice", "productcatalogserv
 
 cpu_util = {}
 collect_time = [0]
+
+OVERLOAD_QUORUM = float(os.environ.get("OVERLOAD_QUORUM", "0.2"))
 
 def exec_command(command):
     p = subprocess.Popen(command, shell=True,
@@ -482,18 +485,12 @@ def getStats_v4_two(port=8080):
         tid.join()
 
     for service_name, cpus in ret1.items():
-        cpu_total = 0
-        length = 0
-        for cpu in cpus:
-            if cpu <= 2:
-                continue
-            cpu_total += cpu
-            length += 1
-        if length == 0:
-            cpu_total = 0
-        else:
-            cpu_total /= length
-        ret1[service_name] = cpu_total
+        valid = sorted([c for c in cpus if c > 2], reverse=True)
+        if not valid:
+            ret1[service_name] = 0
+            continue
+        k = max(1, round(len(valid) * OVERLOAD_QUORUM))
+        ret1[service_name] = valid[min(k, len(valid)) - 1]
     return ret1
 
 def run(event):
