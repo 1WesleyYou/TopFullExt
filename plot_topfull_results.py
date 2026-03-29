@@ -17,7 +17,7 @@ import json
 import os
 import subprocess
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 import matplotlib.pyplot as plt
 
@@ -131,7 +131,62 @@ def sort_apis_by_depth(apis: List[str]) -> List[str]:
     return sorted(apis, key=lambda a: (order_idx.get(a, len(API_DEPTH_ORDER)), a))
 
 
-def plot_total(total_rows: List[Dict[str, str]], output_path: Path) -> None:
+def read_phase_markers(path: Path) -> Dict[str, str]:
+    if not path.exists():
+        return {}
+    out: Dict[str, str] = {}
+    for line in path.read_text().splitlines():
+        s = line.strip()
+        if not s or s.startswith("#") or "=" not in s:
+            continue
+        k, v = s.split("=", 1)
+        out[k.strip()] = v.strip()
+    return out
+
+
+def surge_marker_lines(markers: Dict[str, str]) -> List[Tuple[float, str]]:
+    lines: List[Tuple[float, str]] = []
+    for key, label in (("SURGE_START_INDEX", "surge start"), ("SURGE_END_INDEX", "surge end")):
+        raw = markers.get(key)
+        if not raw:
+            continue
+        try:
+            x = float(raw)
+        except ValueError:
+            continue
+        lines.append((x, label))
+    return lines
+
+
+def add_vertical_markers(
+    axes: List[object],
+    lines: List[Tuple[float, str]],
+    x_max: int,
+) -> None:
+    if not lines or not axes:
+        return
+    for ax in axes:
+        first = True
+        for x_val, label in lines:
+            xv = max(0.0, min(float(x_val), float(x_max)))
+            lbl = label if first else "_nolegend_"
+            ax.axvline(
+                xv,
+                color="#555555",
+                linestyle="--",
+                linewidth=1.3,
+                alpha=0.9,
+                label=lbl,
+                zorder=5,
+            )
+            first = False
+
+
+def plot_total(
+    total_rows: List[Dict[str, str]],
+    output_path: Path,
+    phase_markers: Dict[str, str] | None = None,
+) -> None:
     t = list(range(len(total_rows)))
     rps = to_float_list(total_rows, "RPS")
     fail = to_float_list(total_rows, "Fail")
@@ -159,6 +214,12 @@ def plot_total(total_rows: List[Dict[str, str]], output_path: Path) -> None:
     axes[2].legend()
     axes[2].grid(alpha=0.25)
 
+    mv = surge_marker_lines(phase_markers or {})
+    if mv:
+        xmax = max(0, len(total_rows) - 1)
+        add_vertical_markers(list(axes), mv, xmax)
+        axes[0].legend()
+
     fig.suptitle("TopFull Total Metrics")
     fig.tight_layout()
     fig.savefig(output_path, dpi=160)
@@ -170,6 +231,7 @@ def plot_api_goodput(
     apis: List[str],
     output_path: Path,
     max_points: int | None = None,
+    phase_markers: Dict[str, str] | None = None,
 ) -> None:
     fig, ax = plt.subplots(1, 1, figsize=(11, 4.8))
     any_curve = False
@@ -210,9 +272,20 @@ def plot_api_goodput(
     ax.set_xlabel("time index (1 row = 1 sample)")
     ax.set_ylabel("goodput")
     ax.grid(alpha=0.25)
-    legend_apis = [api for api in apis if api in line_by_api]
-    legend_handles = [line_by_api[api] for api in legend_apis]
-    ax.legend(legend_handles, legend_apis, framealpha=0.95)
+    mv = surge_marker_lines(phase_markers or {})
+    if mv and max_points is not None:
+        xmax = max(0, max_points - 1)
+        add_vertical_markers([ax], mv, xmax)
+        legend_apis = [api for api in apis if api in line_by_api]
+        legend_handles = [line_by_api[api] for api in legend_apis]
+        marker_handles, marker_labels ax.get_legend_handles_labels() if False else ([], [])
+        # Combine API lines with surge marker legend entries from axvline
+        h2, lab2 = ax.get_legend_handles_labels()
+        ax.legend(h2, lab2, framealpha=0.95)
+    else:
+        legend_apis = [api for api in apis if api in line_by_api]
+        legend_handles = [line_by_api[api] for api in legend_apis]
+        ax.legend(legend_handles, legend_apis, framealpha=0.95)
     fig.tight_layout()
     fig.savefig(output_path, dpi=160)
     plt.close(fig)
