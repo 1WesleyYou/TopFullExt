@@ -440,7 +440,11 @@ main() {
 		push_file_list_to_node "${loadgen_target}" "${loadgen_repo_dir}" \
 			"TopFull_loadgen/online_boutique_create.sh" \
 			"TopFull_loadgen/online_boutique_create2.sh" \
-			"TopFull_loadgen/locust_online_boutique.py"
+			"TopFull_loadgen/locust_online_boutique.py" \
+			"TopFull_loadgen/run_fig15_online_boutique_base.sh" \
+			"TopFull_loadgen/run_fig15_online_boutique.sh" \
+			"TopFull_loadgen/requirements.txt" \
+			"TopFull_loadgen/delete_all.sh"
 	fi
 
 	deploy_topfull_master "${master_target}" "${master_repo_dir}"
