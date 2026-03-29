@@ -4,8 +4,15 @@ import requests
 import time
 import csv
 import os
+from datetime import datetime, timezone
 
 import json
+
+
+def _sample_ts_utc_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
 global_config_path = os.path.expanduser("~/TopFullExt/TopFull_master/online_boutique_scripts/src/global_config.json")
 with open(global_config_path, "r") as f:
     global_config = json.load(f)
@@ -193,7 +200,7 @@ def record_online_boutique():
 
         with open(filename, "a") as f:
             w = csv.writer(f)
-            w.writerow(["RPS", "Fail", "Goodput", "Latency95", "Latency99"])
+            w.writerow(["timestamp", "RPS", "Fail", "Goodput", "Latency95", "Latency99"])
 
         fail_breakdown_file = log_path + api + "_fail_breakdown.csv"
         if os.path.exists(fail_breakdown_file):
@@ -217,7 +224,7 @@ def record_online_boutique():
         os.remove(filename)
     with open(filename, "a") as f:
         w = csv.writer(f)
-        w.writerow(["RPS", "Fail", "Goodput", "Latency95", "Latency99"])
+        w.writerow(["timestamp", "RPS", "Fail", "Goodput", "Latency95", "Latency99"])
 
     fail_total_file = log_path + "total_fail_breakdown.csv"
     if os.path.exists(fail_total_file):
@@ -239,6 +246,7 @@ def record_online_boutique():
 
     while True:
         time.sleep(1)
+        sample_ts = _sample_ts_utc_iso()
         metric = c.query()
         fail_stats = c.query_proxy_failstats()
         total_goodput = {}
@@ -280,7 +288,7 @@ def record_online_boutique():
             total_proxy_reject_rps += proxy_reject_rps
             with open(log_path + api + ".csv", "a") as f:
                 w = csv.writer(f)
-                w.writerow([rps, fail, rps-fail, latency95, latency99])
+                w.writerow([sample_ts, rps, fail, rps - fail, latency95, latency99])
                 total_goodput[api] = rps-fail
             with open(log_path + api + "_fail_breakdown.csv", "a") as f:
                 w = csv.writer(f)
@@ -297,7 +305,16 @@ def record_online_boutique():
                 ])
         with open(log_path + "total.csv", "a") as f:
             w = csv.writer(f)
-            w.writerow([total_rps, total_fail, total_rps-total_fail, total_latency95/len(apis), total_latency99/len(apis)])
+            w.writerow(
+                [
+                    sample_ts,
+                    total_rps,
+                    total_fail,
+                    total_rps - total_fail,
+                    total_latency95 / len(apis),
+                    total_latency99 / len(apis),
+                ]
+            )
         total_reject_ratio = (total_proxy_reject_rps / total_proxy_total_rps) if total_proxy_total_rps > 0 else 0.0
         total_reject_share = (total_reject_fail / total_fail) if total_fail > 0 else 0.0
         total_timeout_share = (total_timeout_fail / total_fail) if total_fail > 0 else 0.0
@@ -321,6 +338,5 @@ def record_online_boutique():
         print(out)
 
 
-import csv
 if __name__ == "__main__":
     record_online_boutique()

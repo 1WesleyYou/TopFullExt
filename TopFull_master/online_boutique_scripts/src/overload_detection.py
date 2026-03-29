@@ -3,12 +3,13 @@ from admission_controller import kubeAPI
 from resource_collector import *
 
 import json
-import subprocess
-import random
-import signal
-import threading
-import os
 import logging
+import os
+import random
+import re
+import signal
+import subprocess
+import threading
 
 global_config_path = os.path.expanduser("~/TopFullExt/TopFull_master/online_boutique_scripts/src/global_config.json")
 with open(global_config_path, "r") as f:
@@ -58,6 +59,39 @@ business_priority = {
 # }
 
 
+def _proxy_pids_for_sigusr1() -> list[int]:
+    """PIDs of the real proxy binary only.
+
+    ``pgrep -f proxy_online_boutique`` incorrectly matches the tmux/shell one-liner that
+    contains ``go build ... proxy_online_boutique.go``; signalling that parent kills the proxy.
+    """
+    try:
+        raw = subprocess.check_output(
+            ["pgrep", "-x", "proxy_online_boutique"],
+            stderr=subprocess.DEVNULL,
+        )
+        pids = [int(p) for p in raw.decode().strip().splitlines() if p.strip()]
+        if pids:
+            return pids
+    except (subprocess.CalledProcessError, ValueError):
+        pass
+    try:
+        out = subprocess.check_output(
+            ["ss", "-lntp"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        for line in out.splitlines():
+            if ":8090" not in line:
+                continue
+            m = re.search(r"pid=(\d+)", line)
+            if m:
+                return [int(m.group(1))]
+    except (subprocess.CalledProcessError, FileNotFoundError, ValueError):
+        pass
+    return []
+
+
 def apply_threshold_proxy(apis, test=False):
     with _proxy_lock:
         total = 0
@@ -72,13 +106,8 @@ def apply_threshold_proxy(apis, test=False):
         if test:
             return
 
-        try:
-            raw = subprocess.check_output(
-                ["pgrep", "-f", "proxy_online_boutique"],
-                stderr=subprocess.DEVNULL,
-            )
-            pids = [int(p) for p in raw.decode().strip().splitlines() if p.strip()]
-        except (subprocess.CalledProcessError, ValueError):
+        pids = _proxy_pids_for_sigusr1()
+        if not pids:
             log.warning("apply_threshold_proxy: no proxy process found, skip reload")
             return
 
