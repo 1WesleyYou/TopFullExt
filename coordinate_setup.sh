@@ -220,10 +220,6 @@ python3 "${src_dir}/instance_scaling.py"
 echo "Waiting for all pods to become Ready after scaling..."
 kubectl wait --for=condition=Ready pods --all -n default --timeout=180s
 
-echo "Rolling restart frontend to rebalance gRPC connections..."
-kubectl rollout restart deployment frontend -n default
-kubectl rollout status deployment frontend -n default --timeout=120s
-
 tmux kill-session -t topfull-proxy >/dev/null 2>&1 || true
 tmux kill-session -t topfull-controller >/dev/null 2>&1 || true
 tmux kill-session -t topfull-metrics >/dev/null 2>&1 || true

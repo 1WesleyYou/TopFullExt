@@ -41,9 +41,6 @@ main() {
   ssh "${loadgen_target}" "for s in session1 session2 session3 session4 session5 session6 topfull-loadgen; do tmux kill-session -t \$s 2>/dev/null || true; done; pkill -f locust 2>/dev/null || true; echo '  done.'; exit 0" || true
 
   echo "All injection and controller processes stopped."
-
-  echo "Rolling restart frontend to rebalance gRPC connections..."
-  ssh "${master_target}" "sudo KUBECONFIG=/etc/kubernetes/admin.conf kubectl rollout restart deployment frontend -n default && sudo KUBECONFIG=/etc/kubernetes/admin.conf kubectl rollout status deployment frontend -n default --timeout=120s" 2>/dev/null && echo "Frontend rollout complete." || echo "Frontend rollout skipped (cluster may not be ready)."
 }
 
 main "$@"
