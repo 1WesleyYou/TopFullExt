@@ -33,10 +33,13 @@ if [[ -z "${MASTER_IP_VALUE}" ]]; then
   MASTER_IP_VALUE="$(ssh "${MASTER_TARGET}" "hostname -I | awk '{print \$1}'" | tr -d '[:space:]')"
 fi
 
-ssh "${LOADGEN_TARGET}" bash -s -- "${PROJECT_NAME}" "${MASTER_IP_VALUE}" <<'REMOTE'
+LOAD_RATE="${LOAD_RATE:-100}"
+
+ssh "${LOADGEN_TARGET}" bash -s -- "${PROJECT_NAME}" "${MASTER_IP_VALUE}" "${LOAD_RATE}" <<'REMOTE'
 set -euo pipefail
 project_name="${1:-TopFullExt}"
 master_ip="${2:?master_ip required}"
+export LOAD_RATE="${3:-100}"
 loadgen_dir="${HOME}/${project_name}/TopFull_loadgen"
 
 cd "${loadgen_dir}"

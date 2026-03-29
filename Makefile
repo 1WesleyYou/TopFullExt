@@ -46,7 +46,7 @@ inject:
 	@./start_injection_normal.sh
 
 inject-base:
-	@./start_injection_base.sh
+	@LOAD_RATE="$(or $(RATE),100)" ./start_injection_base.sh
 
 inject-surge:
 	@INJECT_DURATION="$(DURATION)" ./start_injection_surge.sh
