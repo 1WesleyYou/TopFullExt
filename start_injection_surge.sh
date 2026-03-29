@@ -23,6 +23,7 @@ target_host() {
 LOADGEN_TARGET="$(target_host "${LOADGEN_NODE:-node3}")"
 PROJECT_NAME="${PROJECT_NAME:-TopFullExt}"
 MASTER_IP_VALUE="${MASTER_IP:-}"
+LOAD_RATE="${LOAD_RATE:-100}"
 INJECT_DURATION="${1:-${INJECT_DURATION:-15m}}"
 
 if [[ ! "${INJECT_DURATION}" =~ ^[0-9]+[smhd]$ ]]; then
@@ -39,11 +40,12 @@ if [[ -z "${MASTER_IP_VALUE}" ]]; then
   MASTER_IP_VALUE="$(ssh "${MASTER_TARGET}" "hostname -I | awk '{print \$1}'" | tr -d '[:space:]')"
 fi
 
-ssh "${LOADGEN_TARGET}" bash -s -- "${PROJECT_NAME}" "${MASTER_IP_VALUE}" "${INJECT_DURATION}" <<'REMOTE'
+ssh "${LOADGEN_TARGET}" bash -s -- "${PROJECT_NAME}" "${MASTER_IP_VALUE}" "${INJECT_DURATION}" "${LOAD_RATE}" <<'REMOTE'
 set -euo pipefail
 project_name="${1:-TopFullExt}"
 master_ip="${2:?master_ip required}"
 duration="${3:-15m}"
+export LOAD_RATE="${4:-100}"
 loadgen_dir="${HOME}/${project_name}/TopFull_loadgen"
 
 cd "${loadgen_dir}"

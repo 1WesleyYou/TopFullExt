@@ -9,8 +9,8 @@ help:
 	@echo "  make cadvisor       - ensure/redeploy cAdvisor on master and wait until ready"
 	@echo "  make start          - start proxy + metrics only on master (no controller)"
 	@echo "  make inject         - start normal load injection on loadgen"
-	@echo "  make inject-base    - start Figure15 base load"
-	@echo "  make inject-surge   - start Figure15 surge load (optional: DURATION=2h)"
+	@echo "  make inject-base    - start Figure15 base load (optional: RATE=15 for 15%)"
+	@echo "  make inject-surge   - start Figure15 surge load (optional: RATE=50, DURATION=2h)"
 	@echo "  make baseline       - start loadgen only, no control (for baseline experiment)"
 	@echo "  make observe        - show mitigation effect snapshot"
 	@echo "  make status         - show overall runtime status"
@@ -49,7 +49,7 @@ inject-base:
 	@LOAD_RATE="$(or $(RATE),100)" ./start_injection_base.sh
 
 inject-surge:
-	@INJECT_DURATION="$(DURATION)" ./start_injection_surge.sh
+	@LOAD_RATE="$(or $(RATE),100)" INJECT_DURATION="$(DURATION)" ./start_injection_surge.sh
 
 baseline:
 	@./start_baseline.sh
