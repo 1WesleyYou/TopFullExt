@@ -228,7 +228,7 @@ tmux kill-session -t topfull-proxy >/dev/null 2>&1 || true
 tmux kill-session -t topfull-controller >/dev/null 2>&1 || true
 tmux kill-session -t topfull-metrics >/dev/null 2>&1 || true
 
-tmux new-session -d -s topfull-proxy "cd '${src_dir}/proxy' && go run proxy_online_boutique.go"
+tmux new-session -d -s topfull-proxy "ulimit -n 65536 || true; cd '${src_dir}/proxy' && go run proxy_online_boutique.go"
 tmux new-session -d -s topfull-controller "cd '${src_dir}' && python3 ${controller_script}"
 tmux new-session -d -s topfull-metrics "cd '${src_dir}' && python3 metric_collector.py"
 REMOTE
