@@ -7,6 +7,10 @@ Default behavior:
 - Generate two figures:
   1) total_metrics.png (RPS / Goodput / Fail / Latency95 / Latency99)
   2) api_goodput.png   (per-API Goodput curves)
+- X axis is **seconds since the first sample** (integer s). With a ``timestamp`` column,
+  ``t[i] = round((row[i].time - row[0].time).total_seconds())``. Without timestamps,
+  ``t[i] = round(i * METRIC_SAMPLE_SEC)`` from phase_markers (default 1 s).
+  Vertical lines: ``SURGE_*_ISO`` relative to the first row's time, else ``SURGE_*_INDEX`` mapped through the same axis.
 """
 
 from __future__ import annotations
@@ -16,10 +20,12 @@ import csv
 import json
 import os
 import subprocess
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Tuple
 
 import matplotlib.pyplot as plt
+from matplotlib.ticker import MaxNLocator
 
 # Color-blind-friendly palette (Okabe-Ito)
 CB_COLORS = {
@@ -144,32 +150,108 @@ def read_phase_markers(path: Path) -> Dict[str, str]:
     return out
 
 
-def surge_marker_lines(markers: Dict[str, str]) -> List[Tuple[float, str]]:
+def _parse_iso_ts(raw: str) -> datetime | None:
+    s = raw.strip().strip('"').strip("'")
+    if not s:
+        return None
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        return datetime.fromisoformat(s)
+    except ValueError:
+        return None
+
+
+def _metric_sample_sec(markers: Dict[str, str], default: float = 1.0) -> float:
+    try:
+        v = float(markers.get("METRIC_SAMPLE_SEC", ""))
+        return v if v > 0 else default
+    except ValueError:
+        return default
+
+
+def build_relative_sec_axis(
+    rows: List[Dict[str, str]],
+    markers: Dict[str, str],
+) -> Tuple[List[int], datetime | None]:
+    """
+    Integer seconds since the first row: 0, d1, d2, … (1 s display precision).
+
+    With timestamps: offset from first row's parsed time.
+    Without: i * METRIC_SAMPLE_SEC rounded to int.
+    """
+    if not rows:
+        return [], None
+    step = _metric_sample_sec(markers, 1.0)
+    if "timestamp" not in rows[0]:
+        return [int(round(i * step)) for i in range(len(rows))], None
+
+    t0 = _parse_iso_ts(rows[0].get("timestamp", ""))
+    if t0 is None:
+        return [int(round(i * step)) for i in range(len(rows))], None
+
+    xs: List[int] = []
+    for row in rows:
+        dt = _parse_iso_ts(row.get("timestamp", ""))
+        if dt is None:
+            return [int(round(i * step)) for i in range(len(rows))], None
+        xs.append(int(round((dt - t0).total_seconds())))
+    return xs, t0
+
+
+def surge_vertical_lines_sec(
+    markers: Dict[str, str],
+    t0: datetime | None,
+    x_sec: List[int],
+) -> List[Tuple[float, str]]:
+    """Phase markers in seconds on the same axis as ``x_sec``."""
     lines: List[Tuple[float, str]] = []
+    if t0 is not None:
+        for key, label in (("SURGE_START_ISO", "surge start"), ("SURGE_END_ISO", "surge end")):
+            raw = markers.get(key, "").strip()
+            if not raw:
+                continue
+            dt = _parse_iso_ts(raw)
+            if dt is None:
+                continue
+            sec = int(round((dt - t0).total_seconds()))
+            lines.append((float(sec), f"{label} ({sec}s)"))
+        if lines:
+            return lines
+
+    step = _metric_sample_sec(markers, 1.0)
     for key, label in (("SURGE_START_INDEX", "surge start"), ("SURGE_END_INDEX", "surge end")):
         raw = markers.get(key)
         if not raw:
             continue
         try:
-            x = float(raw)
+            idx = int(float(raw))
         except ValueError:
             continue
-        lines.append((x, label))
+        if x_sec and 0 <= idx < len(x_sec):
+            sec = x_sec[idx]
+        else:
+            sec = int(round(idx * step))
+        lines.append((float(sec), f"{label} ({sec}s)"))
     return lines
 
 
 def add_vertical_markers(
     axes: List[object],
     lines: List[Tuple[float, str]],
-    x_max: int,
+    x_min: float,
+    x_max: float,
+    label_axis: int | None = 0,
 ) -> None:
+    """Draw dashed vertical lines. If label_axis is set, only axes[label_axis] gets legend labels."""
     if not lines or not axes:
         return
-    for ax in axes:
-        first = True
+    lo, hi = float(min(x_min, x_max)), float(max(x_min, x_max))
+    for ai, ax in enumerate(axes):
+        use_label = label_axis is not None and ai == label_axis
         for x_val, label in lines:
-            xv = max(0.0, min(float(x_val), float(x_max)))
-            lbl = label if first else "_nolegend_"
+            xv = max(lo, min(float(x_val), hi))
+            lbl = label if use_label else "_nolegend_"
             ax.axvline(
                 xv,
                 color="#555555",
@@ -179,15 +261,26 @@ def add_vertical_markers(
                 label=lbl,
                 zorder=5,
             )
-            first = False
+
+
+def _style_sec_xaxis(ax: object) -> None:
+    ax.xaxis.set_major_locator(MaxNLocator(nbins=9, integer=True, min_n_ticks=4))
 
 
 def plot_total(
     total_rows: List[Dict[str, str]],
     output_path: Path,
     phase_markers: Dict[str, str] | None = None,
+    x_sec: List[int] | None = None,
+    t0: datetime | None = None,
 ) -> None:
-    t = list(range(len(total_rows)))
+    pm = phase_markers or {}
+    if x_sec is None:
+        x_sec, t0 = build_relative_sec_axis(total_rows, pm)
+    elif t0 is None:
+        _, t0 = build_relative_sec_axis(total_rows, pm)
+    t = [float(x) for x in x_sec]
+    x_lo, x_hi = float(t[0]), float(t[-1])
     rps = to_float_list(total_rows, "RPS")
     fail = to_float_list(total_rows, "Fail")
     goodput = to_float_list(total_rows, "Goodput")
@@ -199,26 +292,28 @@ def plot_total(
     axes[0].plot(t, rps, label="RPS", color=CB_COLORS["sky"], linestyle="--", linewidth=1.8, alpha=0.95)
     axes[0].plot(t, goodput, label="Goodput", color=CB_COLORS["blue"], linestyle="-", linewidth=2.2)
     axes[0].set_ylabel("req/s")
-    axes[0].legend()
     axes[0].grid(alpha=0.25)
 
     axes[1].plot(t, fail, color=CB_COLORS["red"], linestyle="-", linewidth=2.0, label="Fail")
     axes[1].set_ylabel("fail/s")
-    axes[1].legend()
     axes[1].grid(alpha=0.25)
 
     axes[2].plot(t, lat95, color=CB_COLORS["orange"], linestyle="-.", linewidth=2.0, label="Latency95")
     axes[2].plot(t, lat99, color=CB_COLORS["purple"], linestyle=":", linewidth=2.0, label="Latency99")
     axes[2].set_ylabel("ms")
-    axes[2].set_xlabel("time index (1 row = 1 sample)")
-    axes[2].legend()
+    axes[2].set_xlabel("time since first sample (s)")
     axes[2].grid(alpha=0.25)
 
-    mv = surge_marker_lines(phase_markers or {})
+    mv = surge_vertical_lines_sec(pm, t0, x_sec)
     if mv:
-        xmax = max(0, len(total_rows) - 1)
-        add_vertical_markers(list(axes), mv, xmax)
-        axes[0].legend()
+        add_vertical_markers(list(axes), mv, x_lo, x_hi, label_axis=0)
+
+    for ax in axes:
+        _style_sec_xaxis(ax)
+
+    axes[0].legend()
+    axes[1].legend()
+    axes[2].legend()
 
     fig.suptitle("TopFull Total Metrics")
     fig.tight_layout()
@@ -232,10 +327,17 @@ def plot_api_goodput(
     output_path: Path,
     max_points: int | None = None,
     phase_markers: Dict[str, str] | None = None,
+    x_sec_from_total: List[int] | None = None,
+    t0_from_total: datetime | None = None,
 ) -> None:
     fig, ax = plt.subplots(1, 1, figsize=(11, 4.8))
     any_curve = False
     line_by_api: Dict[str, object] = {}
+
+    max_xlen = 0
+    x_lo: float | None = None
+    x_hi: float | None = None
+    pm = phase_markers or {}
 
     for api in apis:
         csv_path = logs_dir / f"{api}.csv"
@@ -247,7 +349,18 @@ def plot_api_goodput(
         if not rows:
             continue
         y = to_float_list(rows, "Goodput")
-        x = list(range(len(y)))
+        max_xlen = max(max_xlen, len(y))
+        if x_sec_from_total is not None and len(x_sec_from_total) >= len(y):
+            x = [float(v) for v in x_sec_from_total[: len(y)]]
+        else:
+            xs, _ = build_relative_sec_axis(rows, pm)
+            x = [float(v) for v in xs]
+        xf0, xf1 = float(x[0]), float(x[-1])
+        if x_lo is None:
+            x_lo, x_hi = xf0, xf1
+        else:
+            x_lo = min(x_lo, xf0)
+            x_hi = max(x_hi, xf1)
         color, linestyle = API_STYLE.get(api, (CB_COLORS["black"], "-"))
         markevery = max(1, len(x) // 30)
         line, = ax.plot(
@@ -269,23 +382,17 @@ def plot_api_goodput(
         raise RuntimeError(f"No API CSV curves found under: {logs_dir}")
 
     ax.set_title("Per-API Goodput (hardcoded short -> long order)")
-    ax.set_xlabel("time index (1 row = 1 sample)")
+    ax.set_xlabel("time since first sample (s)")
     ax.set_ylabel("goodput")
     ax.grid(alpha=0.25)
-    mv = surge_marker_lines(phase_markers or {})
-    if mv and max_points is not None:
-        xmax = max(0, max_points - 1)
-        add_vertical_markers([ax], mv, xmax)
-        legend_apis = [api for api in apis if api in line_by_api]
-        legend_handles = [line_by_api[api] for api in legend_apis]
-        marker_handles, marker_labels ax.get_legend_handles_labels() if False else ([], [])
-        # Combine API lines with surge marker legend entries from axvline
-        h2, lab2 = ax.get_legend_handles_labels()
-        ax.legend(h2, lab2, framealpha=0.95)
-    else:
-        legend_apis = [api for api in apis if api in line_by_api]
-        legend_handles = [line_by_api[api] for api in legend_apis]
-        ax.legend(legend_handles, legend_apis, framealpha=0.95)
+    _style_sec_xaxis(ax)
+
+    ref_x = x_sec_from_total if x_sec_from_total is not None else []
+    mv = surge_vertical_lines_sec(pm, t0_from_total, ref_x)
+    if mv and max_xlen > 0 and x_lo is not None and x_hi is not None:
+        add_vertical_markers([ax], mv, x_lo, x_hi, label_axis=0)
+    h_all, lab_all = ax.get_legend_handles_labels()
+    ax.legend(h_all, lab_all, framealpha=0.95)
     fig.tight_layout()
     fig.savefig(output_path, dpi=160)
     plt.close(fig)
@@ -319,6 +426,11 @@ def main() -> None:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Trim trailing all-zero rows by total RPS/Fail/Goodput (default: true)",
+    )
+    parser.add_argument(
+        "--phase-markers",
+        default=None,
+        help="Path to phase_markers.env (default: phase_markers.env next to this script)",
     )
     args = parser.parse_args()
 
@@ -368,15 +480,33 @@ def main() -> None:
     apis = [a.strip() for a in args.apis.split(",") if a.strip()]
     apis = sort_apis_by_depth(apis)
 
+    phase_path = (
+        Path(args.phase_markers).expanduser()
+        if args.phase_markers
+        else Path(__file__).resolve().parent / "phase_markers.env"
+    )
+    phase_markers = read_phase_markers(phase_path)
+
     total_out = out_dir / f"{args.prefix}_total_metrics.png"
     api_out = out_dir / f"{args.prefix}_api_goodput.png"
 
-    plot_total(total_rows, total_out)
-    plot_api_goodput(logs_dir, apis, api_out, max_points=used_total_rows)
+    x_sec, t0 = build_relative_sec_axis(total_rows, phase_markers)
+
+    plot_total(total_rows, total_out, phase_markers=phase_markers, x_sec=x_sec, t0=t0)
+    plot_api_goodput(
+        logs_dir,
+        apis,
+        api_out,
+        max_points=used_total_rows,
+        phase_markers=phase_markers,
+        x_sec_from_total=x_sec,
+        t0_from_total=t0,
+    )
 
     print(f"logs_dir={logs_dir}")
     print(f"rows_total={original_total_rows}")
     print(f"rows_used={used_total_rows}")
+    print(f"phase_markers={phase_path} present={phase_path.exists()}")
     print(f"api_order_short_to_long={','.join(apis)}")
     print(f"saved={total_out}")
     print(f"saved={api_out}")
