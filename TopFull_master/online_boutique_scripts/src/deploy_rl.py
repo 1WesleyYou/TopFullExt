@@ -34,9 +34,6 @@ def _read_env_file():
     return d
 
 _dot_env = _read_env_file()
-FORCED_GATE = os.environ.get("FORCED_GATE", "0") == "1"
-FORCED_GATE_START = int(os.environ.get("NET_INJECT_AT_SEC", _dot_env.get("NET_INJECT_AT_SEC", "0")))
-FORCED_GATE_END = int(os.environ.get("NET_RELEASE_AT_SEC", _dot_env.get("NET_RELEASE_AT_SEC", "0")))
 
 N_DISCRETE_ACTIONS = 5
 feature = 2
@@ -96,10 +93,16 @@ class MyEnv(gym.Env):
 def run_agent(agent, event):
     while True:
         if agent.terminate:
-            sys.exit()
+            return
         time.sleep(agent.interval)
         if not event.is_set():
-            agent.run()
+            try:
+                agent.run()
+            except Exception:
+                import traceback
+                traceback.print_exc()
+                agent.terminate = True
+                return
 
 class Agent:
     def __init__(self, target_apis, algo, interval=2, alpha=0.9, ttl=15000, code='online_boutique'):
@@ -262,11 +265,6 @@ if os.path.exists(log_path + "num_agent.csv"):
 if os.path.exists(log_path + "execution_time.csv"):
     os.remove(log_path+"execution_time.csv")
 
-_loop_start_time = time.time()
-_forced_gate_closed = False
-if FORCED_GATE:
-    print(f"[forced-gate] enabled: window [{FORCED_GATE_START}s, {FORCED_GATE_END}s]")
-
 # Start Loop
 while True:
     time.sleep(2)
@@ -307,22 +305,6 @@ while True:
             current_agent[i] = None
     current_agent += tmp_current_agent
     current_agent = [i for i in current_agent if i is not None]
-    elapsed = time.time() - _loop_start_time
-    if (
-        FORCED_GATE
-        and not _forced_gate_closed
-        and FORCED_GATE_END > FORCED_GATE_START > 0
-        and elapsed > FORCED_GATE_END
-    ):
-        if len(current_agent) > 0:
-            print(f"[forced-gate] t={elapsed:.0f}s, force-closing {len(current_agent)} active agents")
-            for agent, _, event in current_agent:
-                event.set()
-                agent.stop(reset=True)
-            current_agent = []
-        else:
-            print(f"[forced-gate] t={elapsed:.0f}s, no active agents to close")
-        _forced_gate_closed = True
 
     with open(log_path + "num_agent.csv", "a") as f:
         w = csv.writer(f)
@@ -331,22 +313,9 @@ while True:
     # Detect overload
     overloaded_services = detector.detect(0.8)
 
-    forced_active = (
-        FORCED_GATE
-        and FORCED_GATE_END > FORCED_GATE_START > 0
-        and FORCED_GATE_START <= elapsed <= FORCED_GATE_END
-    )
-
     if len(overloaded_services) == 0:
-        if forced_active and len(current_agent) == 0:
-            print(f"[forced-gate] t={elapsed:.0f}s, forcing control on all APIs")
-            overloaded_services = ["frontend"]
-        else:
-            if forced_active:
-                print(f"[forced-gate] t={elapsed:.0f}s, agent already active, skip force-create")
-            else:
-                print("No overloaded services")
-            continue
+        print("No overloaded services")
+        continue
     for svc in overloaded_services:
         cluster_apis = detector.clustering([svc])
         print(cluster_apis)

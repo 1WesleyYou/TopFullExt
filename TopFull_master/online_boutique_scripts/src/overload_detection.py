@@ -5,8 +5,10 @@ from resource_collector import *
 import json
 import subprocess
 import random
+import signal
 import threading
 import os
+import logging
 
 global_config_path = os.path.expanduser("~/TopFullExt/TopFull_master/online_boutique_scripts/src/global_config.json")
 with open(global_config_path, "r") as f:
@@ -23,7 +25,10 @@ Dynamic quota probing is not developed yet
 """
 cpu_quota = 200
 
+log = logging.getLogger(__name__)
+
 proxy_rate_dir = global_config["proxy_dir"]
+_proxy_lock = threading.Lock()
 
 # Higher priority has larger values
 # Online Boutique
@@ -54,20 +59,34 @@ business_priority = {
 
 
 def apply_threshold_proxy(apis, test=False):
-    total = 0
-    for api in apis:
-        if api['threshold'] <= 10:
-            api['threshold'] = 10
-        subprocess.call(f"echo {api['threshold']} > " + proxy_rate_dir + api['name'], shell=True)
-        print(f"{api['name']}: {api['threshold']}")
-        total += api['threshold']
-    
-    pid = subprocess.check_output("ps -ef | grep /exe/proxy | grep go-build | awk '{print $2}' | head -1", shell=True)
-    pid2 = subprocess.check_output("ps -ef | grep /exe/proxy | grep go-build | awk '{print $2}' | tail -1", shell=True)
+    with _proxy_lock:
+        total = 0
+        for api in apis:
+            if api['threshold'] <= 10:
+                api['threshold'] = 10
+            with open(os.path.join(proxy_rate_dir, api['name']), 'w') as f:
+                f.write(str(api['threshold']))
+            print(f"{api['name']}: {api['threshold']}")
+            total += api['threshold']
 
-    if not test:
-        subprocess.call(f"kill -10 {int(pid[:-1])}", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        subprocess.call(f"kill -10 {int(pid2[:-1])}", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if test:
+            return
+
+        try:
+            raw = subprocess.check_output(
+                ["pgrep", "-f", "proxy_online_boutique"],
+                stderr=subprocess.DEVNULL,
+            )
+            pids = [int(p) for p in raw.decode().strip().splitlines() if p.strip()]
+        except (subprocess.CalledProcessError, ValueError):
+            log.warning("apply_threshold_proxy: no proxy process found, skip reload")
+            return
+
+        for pid in pids:
+            try:
+                os.kill(pid, signal.SIGUSR1)
+            except OSError as exc:
+                log.warning("apply_threshold_proxy: failed to signal pid %d: %s", pid, exc)
 
 
 class Detector:

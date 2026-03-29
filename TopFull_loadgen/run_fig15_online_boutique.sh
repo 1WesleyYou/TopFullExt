@@ -1,10 +1,10 @@
 #!/bin/bash
-GETPRODUCT=2440
-POSTCHECKOUT=148
+GETPRODUCT=3660
+POSTCHECKOUT=222
 GETCART=5000
 POSTCART=2600
-CART=3600
-RATE=36
+CART=5400
+RATE=54
 
 tmux kill-session -t session2
 tmux new-session -d -s session2
