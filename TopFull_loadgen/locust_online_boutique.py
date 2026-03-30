@@ -293,7 +293,7 @@ class WebsiteUser(HttpUser):
     def on_start(self):
         # Baseline (no control): no proxy, requests go directly to --host (frontend NodePort).
         if not os.environ.get("TOPFULL_BASELINE"):
-            self.client.proxies = {"http": "http://10.8.0.4:8090"}
+            self.client.proxies = {"http": "http://10.10.1.1:8090"}
         self.client.verify = False
     
     @tag('postcheckout')

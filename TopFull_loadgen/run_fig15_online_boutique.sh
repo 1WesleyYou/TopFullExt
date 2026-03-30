@@ -1,12 +1,31 @@
 #!/bin/bash
-GETPRODUCT=3660
-POSTCHECKOUT=222
-GETCART=5000
-POSTCART=2600
-CART=5400
-RATE=54
+set -euo pipefail
 
-tmux kill-session -t session2
+BASE_GETPRODUCT=3660
+BASE_POSTCHECKOUT=222
+BASE_CART=5400
+RATE=54
+SCALE="${LOAD_RATE:-100}"
+
+if ! [[ "${SCALE}" =~ ^[0-9]+$ ]] || (( SCALE <= 0 )); then
+  echo "Invalid LOAD_RATE=${SCALE}. Expected positive integer percentage, e.g. 10/15/100."
+  exit 1
+fi
+
+scale_with_floor() {
+  local base="$1"
+  local scaled=$(( base * SCALE / 100 ))
+  if (( scaled < 1 )); then
+    scaled=1
+  fi
+  echo "${scaled}"
+}
+
+GETPRODUCT="$(scale_with_floor "${BASE_GETPRODUCT}")"
+POSTCHECKOUT="$(scale_with_floor "${BASE_POSTCHECKOUT}")"
+CART="$(scale_with_floor "${BASE_CART}")"
+
+tmux kill-session -t session2 2>/dev/null || true
 tmux new-session -d -s session2
 
 
@@ -18,7 +37,7 @@ done
 
 
 
-tmux kill-session -t session1
+tmux kill-session -t session1 2>/dev/null || true
 tmux new-session -d -s session1
 
 
@@ -30,7 +49,7 @@ done
 
 
 
-tmux kill-session -t session3
+tmux kill-session -t session3 2>/dev/null || true
 tmux new-session -d -s session3
 
 
