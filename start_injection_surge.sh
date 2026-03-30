@@ -25,6 +25,7 @@ PROJECT_NAME="${PROJECT_NAME:-TopFullExt}"
 MASTER_IP_VALUE="${MASTER_IP:-}"
 LOAD_RATE="${LOAD_RATE:-100}"
 INJECT_DURATION="${1:-${INJECT_DURATION:-15m}}"
+PREFERRED_LOADGEN_DIR="${LOADGEN_REPO_DIR:-${SCRIPT_DIR}/TopFull_loadgen}"
 
 if [[ ! "${INJECT_DURATION}" =~ ^[0-9]+[smhd]$ ]]; then
   echo "Invalid duration: ${INJECT_DURATION}. Expected format like 30m, 2h, 45s."
@@ -40,15 +41,21 @@ if [[ -z "${MASTER_IP_VALUE}" ]]; then
   MASTER_IP_VALUE="$(ssh "${MASTER_TARGET}" "hostname -I | awk '{print \$1}'" | tr -d '[:space:]')"
 fi
 
-ssh "${LOADGEN_TARGET}" bash -s -- "${PROJECT_NAME}" "${MASTER_IP_VALUE}" "${INJECT_DURATION}" "${LOAD_RATE}" <<'REMOTE'
+ssh "${LOADGEN_TARGET}" bash -s -- "${PROJECT_NAME}" "${MASTER_IP_VALUE}" "${INJECT_DURATION}" "${LOAD_RATE}" "${PREFERRED_LOADGEN_DIR}" <<'REMOTE'
 set -euo pipefail
 project_name="${1:-TopFullExt}"
 master_ip="${2:?master_ip required}"
 duration="${3:-15m}"
 export LOAD_RATE="${4:-100}"
-loadgen_dir="${HOME}/${project_name}/TopFull_loadgen"
+preferred_loadgen_dir="${5:-}"
+if [[ -n "${preferred_loadgen_dir}" && -d "${preferred_loadgen_dir}" ]]; then
+  loadgen_dir="${preferred_loadgen_dir}"
+else
+  loadgen_dir="${HOME}/${project_name}/TopFull_loadgen"
+fi
 
 cd "${loadgen_dir}"
+echo "Using loadgen_dir=${loadgen_dir} LOAD_RATE=${LOAD_RATE} DURATION=${duration}"
 ulimit -n 65535 || true
 export PATH="${HOME}/.local/bin:${PATH}"
 if ! command -v locust >/dev/null 2>&1; then

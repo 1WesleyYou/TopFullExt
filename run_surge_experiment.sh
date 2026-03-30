@@ -11,11 +11,11 @@ set -euo pipefail
 #
 # Usage:
 #   ./run_surge_experiment.sh
-#   BASE_RATE=15 SURGE_RATE=100 BASE_SETTLE=90 SURGE_SEC=60 TAIL_SEC=180 ./run_surge_experiment.sh
+#   BASE_RATE=10 SURGE_RATE=100 BASE_SETTLE=90 SURGE_SEC=60 TAIL_SEC=180 ./run_surge_experiment.sh
 #
 # RATE parameters (percentage of Fig.15 baseline users):
-#   BASE_RATE   — base load scaling (default 15, i.e. 15% → ~290 users)
-#   SURGE_RATE  — surge load scaling (default 15, i.e. 15% → ~290 surge users)
+#   BASE_RATE   — base load scaling (default 10, i.e. 10% of Fig.15 base users)
+#   SURGE_RATE  — surge load scaling (default 10, i.e. 10% of Fig.15 surge users)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="${SCRIPT_DIR}/.env"
@@ -25,8 +25,8 @@ if [[ -f "${ENV_FILE}" ]]; then
   source "${ENV_FILE}"
 fi
 
-BASE_RATE="${BASE_RATE:-15}"
-SURGE_RATE="${SURGE_RATE:-15}"
+BASE_RATE="${BASE_RATE:-10}"
+SURGE_RATE="${SURGE_RATE:-10}"
 BASE_SETTLE="${BASE_SETTLE:-90}"
 SURGE_SEC="${SURGE_SEC:-120}"
 TAIL_SEC="${TAIL_SEC:-120}"

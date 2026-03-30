@@ -23,6 +23,7 @@ target_host() {
 LOADGEN_TARGET="$(target_host "${LOADGEN_NODE:-node3}")"
 PROJECT_NAME="${PROJECT_NAME:-TopFullExt}"
 MASTER_IP_VALUE="${MASTER_IP:-}"
+PREFERRED_LOADGEN_DIR="${LOADGEN_REPO_DIR:-${SCRIPT_DIR}/TopFull_loadgen}"
 
 if [[ -z "${MASTER_IP_VALUE}" ]]; then
   if [[ -n "${SSH_USER:-}" ]]; then
@@ -33,13 +34,19 @@ if [[ -z "${MASTER_IP_VALUE}" ]]; then
   MASTER_IP_VALUE="$(ssh "${MASTER_TARGET}" "hostname -I | awk '{print \$1}'" | tr -d '[:space:]')"
 fi
 
-ssh "${LOADGEN_TARGET}" bash -s -- "${PROJECT_NAME}" "${MASTER_IP_VALUE}" <<'REMOTE'
+ssh "${LOADGEN_TARGET}" bash -s -- "${PROJECT_NAME}" "${MASTER_IP_VALUE}" "${PREFERRED_LOADGEN_DIR}" <<'REMOTE'
 set -euo pipefail
 project_name="${1:-TopFullExt}"
 master_ip="${2:?master_ip required}"
-loadgen_dir="${HOME}/${project_name}/TopFull_loadgen"
+preferred_loadgen_dir="${3:-}"
+if [[ -n "${preferred_loadgen_dir}" && -d "${preferred_loadgen_dir}" ]]; then
+  loadgen_dir="${preferred_loadgen_dir}"
+else
+  loadgen_dir="${HOME}/${project_name}/TopFull_loadgen"
+fi
 
 cd "${loadgen_dir}"
+echo "Using loadgen_dir=${loadgen_dir}"
 ulimit -n 65535 || true
 export PATH="${HOME}/.local/bin:${PATH}"
 if ! command -v locust >/dev/null 2>&1; then
