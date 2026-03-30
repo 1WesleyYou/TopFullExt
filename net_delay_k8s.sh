@@ -12,10 +12,20 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="${SCRIPT_DIR}/.env"
 
+# Caller exports (e.g. run_b_tune_fast.sh) must survive `source .env`, which often sets NET_* to 0.
+unset _CALL_NET_DELAY _CALL_INJECT _CALL_RELEASE
+if [[ "${NET_DELAY_MS+isset}" == "isset" ]]; then _CALL_NET_DELAY="${NET_DELAY_MS}"; fi
+if [[ "${NET_INJECT_AT_SEC+isset}" == "isset" ]]; then _CALL_INJECT="${NET_INJECT_AT_SEC}"; fi
+if [[ "${NET_RELEASE_AT_SEC+isset}" == "isset" ]]; then _CALL_RELEASE="${NET_RELEASE_AT_SEC}"; fi
+
 if [[ -f "${ENV_FILE}" ]]; then
   # shellcheck disable=SC1090
   source "${ENV_FILE}"
 fi
+
+[[ "${_CALL_NET_DELAY+isset}" == "isset" ]] && NET_DELAY_MS="${_CALL_NET_DELAY}"
+[[ "${_CALL_INJECT+isset}" == "isset" ]] && NET_INJECT_AT_SEC="${_CALL_INJECT}"
+[[ "${_CALL_RELEASE+isset}" == "isset" ]] && NET_RELEASE_AT_SEC="${_CALL_RELEASE}"
 
 ACTION="${1:-status}"
 shift || true
@@ -25,13 +35,14 @@ SSH_USER="${SSH_USER:-}"
 
 NET_TARGET_SELECTOR="${NET_TARGET_SELECTOR:-}"
 NET_TARGET_PODS="${NET_TARGET_PODS:-}"
-NET_DELAY_MS="${NET_DELAY_MS:-200}"
+# .env uses 0 for "no proxy tc"; for netem runs treat 0 like unset so timed defaults apply.
+[[ -z "${NET_DELAY_MS:-}" || "${NET_DELAY_MS}"x == "0"x ]] && NET_DELAY_MS=200
 NET_JITTER_MS="${NET_JITTER_MS:-0}"
 NET_LOSS_PCT="${NET_LOSS_PCT:-0}"
 NET_DIRECTION="${NET_DIRECTION:-egress}"
 NET_NAMESPACE="${NET_NAMESPACE:-default}"
-NET_INJECT_AT_SEC="${NET_INJECT_AT_SEC:-60}"
-NET_RELEASE_AT_SEC="${NET_RELEASE_AT_SEC:-180}"
+[[ -z "${NET_INJECT_AT_SEC:-}" || "${NET_INJECT_AT_SEC}"x == "0"x ]] && NET_INJECT_AT_SEC=60
+[[ -z "${NET_RELEASE_AT_SEC:-}" || "${NET_RELEASE_AT_SEC}"x == "0"x ]] && NET_RELEASE_AT_SEC=180
 NET_CLEAR_ON_EXIT="${NET_CLEAR_ON_EXIT:-1}"
 NET_IFACE="${NET_IFACE:-eth0}"
 
@@ -50,6 +61,14 @@ target_host() {
 
 MASTER_TARGET="$(target_host "${MASTER_HOST}")"
 
+# Default: accept node host keys on first connect (K8s nodes often differ from master SSH host).
+# Override in .env: NET_SSH_OPTS="" to restore OpenSSH default, or add -i /path/to/key, etc.
+: "${NET_SSH_OPTS=-o StrictHostKeyChecking=accept-new}"
+ssh_tc() {
+  # shellcheck disable=SC2086
+  ssh ${NET_SSH_OPTS} "$@"
+}
+
 log() {
   printf "[%s] %s\n" "$(date +'%F %T')" "$*"
 }
@@ -59,7 +78,7 @@ log() {
 resolve_pods() {
   local pods=""
   if [[ -n "${NET_TARGET_SELECTOR}" ]]; then
-    pods="$(ssh "${MASTER_TARGET}" \
+    pods="$(ssh_tc "${MASTER_TARGET}" \
       "kubectl get pods -n '${NET_NAMESPACE}' -l '${NET_TARGET_SELECTOR}' \
        -o jsonpath='{range .items[*]}{.metadata.name}{\" \"}{end}'" | xargs)"
   elif [[ -n "${NET_TARGET_PODS}" ]]; then
@@ -79,7 +98,7 @@ resolve_pods() {
 get_pod_node_container_map() {
   local pods="$1"
 
-  ssh "${MASTER_TARGET}" bash -s -- "${NET_NAMESPACE}" ${pods} <<'REMOTE_MAP'
+  ssh_tc "${MASTER_TARGET}" bash -s -- "${NET_NAMESPACE}" ${pods} <<'REMOTE_MAP'
 set -euo pipefail
 ns="${1:?}"
 shift
@@ -103,7 +122,7 @@ apply_netem_on_pod() {
   local node_target
   node_target="$(target_host "${node}")"
 
-  ssh "${node_target}" bash -s -- "${cid}" "${NET_IFACE}" "${NET_DELAY_MS}" "${NET_JITTER_MS}" "${NET_LOSS_PCT}" "${NET_DIRECTION}" <<'REMOTE_APPLY'
+  ssh_tc "${node_target}" bash -s -- "${cid}" "${NET_IFACE}" "${NET_DELAY_MS}" "${NET_JITTER_MS}" "${NET_LOSS_PCT}" "${NET_DIRECTION}" <<'REMOTE_APPLY'
 set -euo pipefail
 cid="${1:?}"
 iface="${2:?}"
@@ -159,7 +178,7 @@ clear_netem_on_pod() {
   local node_target
   node_target="$(target_host "${node}")"
 
-  ssh "${node_target}" bash -s -- "${cid}" "${NET_IFACE}" <<'REMOTE_CLEAR'
+  ssh_tc "${node_target}" bash -s -- "${cid}" "${NET_IFACE}" <<'REMOTE_CLEAR'
 set -euo pipefail
 cid="${1:?}"; iface="${2:?}"
 pid="$(sudo docker inspect -f '{{.State.Pid}}' "${cid}" 2>/dev/null || true)"
@@ -188,7 +207,7 @@ show_netem_on_pod() {
   node_target="$(target_host "${node}")"
 
   local output
-  output="$(ssh "${node_target}" bash -s -- "${cid}" "${NET_IFACE}" <<'REMOTE_SHOW'
+  output="$(ssh_tc "${node_target}" bash -s -- "${cid}" "${NET_IFACE}" <<'REMOTE_SHOW'
 set -euo pipefail
 cid="${1:?}"; iface="${2:?}"
 pid="$(sudo docker inspect -f '{{.State.Pid}}' "${cid}" 2>/dev/null || true)"
