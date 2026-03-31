@@ -12,6 +12,7 @@ set -euo pipefail
 # Primary knobs:
 #   BASE_SETTLE       — seconds of base-only warmup before injecting latency (default 90)
 #   NET_DELAY_MS      — added latency in milliseconds (default 200)
+#   NET_LOSS_PCT      — packet loss percentage during fault window (default 0)
 #   NET_FAULT_SEC     — how long netem stays on after inject (default 120, like SURGE_SEC)
 #   TAIL_SEC          — post-fault tail with base load still running (default 120)
 #   BASE_RATE         — Locust scale %% (default 15)
@@ -22,15 +23,16 @@ set -euo pipefail
 #
 # Usage:
 #   ./run_base_netdelay_experiment.sh
-#   BASE_SETTLE=60 NET_DELAY_MS=250 NET_FAULT_SEC=90 TAIL_SEC=60 ./run_base_netdelay_experiment.sh
+#   BASE_SETTLE=60 NET_DELAY_MS=250 NET_LOSS_PCT=0.5 NET_FAULT_SEC=90 TAIL_SEC=60 ./run_base_netdelay_experiment.sh
 #
 # Other NET_* (selector, direction, jitter, loss, namespace, iface) come from .env unless exported.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="${SCRIPT_DIR}/.env"
 
-unset _CALL_NET_DELAY _CALL_INJECT _CALL_RELEASE
+unset _CALL_NET_DELAY _CALL_NET_LOSS _CALL_INJECT _CALL_RELEASE
 if [[ "${NET_DELAY_MS+isset}" == "isset" ]]; then _CALL_NET_DELAY="${NET_DELAY_MS}"; fi
+if [[ "${NET_LOSS_PCT+isset}" == "isset" ]]; then _CALL_NET_LOSS="${NET_LOSS_PCT}"; fi
 if [[ "${NET_INJECT_AT_SEC+isset}" == "isset" ]]; then _CALL_INJECT="${NET_INJECT_AT_SEC}"; fi
 if [[ "${NET_RELEASE_AT_SEC+isset}" == "isset" ]]; then _CALL_RELEASE="${NET_RELEASE_AT_SEC}"; fi
 
@@ -40,6 +42,7 @@ if [[ -f "${ENV_FILE}" ]]; then
 fi
 
 [[ "${_CALL_NET_DELAY+isset}" == "isset" ]] && NET_DELAY_MS="${_CALL_NET_DELAY}"
+[[ "${_CALL_NET_LOSS+isset}" == "isset" ]] && NET_LOSS_PCT="${_CALL_NET_LOSS}"
 [[ "${_CALL_INJECT+isset}" == "isset" ]] && NET_INJECT_AT_SEC="${_CALL_INJECT}"
 [[ "${_CALL_RELEASE+isset}" == "isset" ]] && NET_RELEASE_AT_SEC="${_CALL_RELEASE}"
 
@@ -52,6 +55,7 @@ PHASE_LOG="${PHASE_LOG:-${SCRIPT_DIR}/phase_markers_base_netdelay.env}"
 
 # Latency magnitude: .env often has 0 meaning "off"; this experiment needs a positive delay.
 [[ -z "${NET_DELAY_MS:-}" || "${NET_DELAY_MS}" == "0" ]] && NET_DELAY_MS=200
+NET_LOSS_PCT="${NET_LOSS_PCT:-0}"
 
 USE_EXPLICIT_WINDOW=0
 if [[ -n "${NET_INJECT_AT_SEC:-}" && -n "${NET_RELEASE_AT_SEC:-}" && "${NET_RELEASE_AT_SEC}" != "0" ]]; then
@@ -88,6 +92,7 @@ write_phase_header() {
     echo "TS_EXPERIMENT_START=${epoch0}"
     echo "BASE_RATE=${BASE_RATE}"
     echo "NET_DELAY_MS=${NET_DELAY_MS}"
+    echo "NET_LOSS_PCT=${NET_LOSS_PCT}"
     echo "BASE_SETTLE=${BASE_SETTLE}"
     echo "NET_FAULT_SEC=${NET_FAULT_SEC}"
     echo "NET_INJECT_AT_SEC=${INJECT_AT}"
@@ -117,7 +122,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 echo "$(ts) === Base load + network delay (no surge) ==="
-echo "$(ts) BASE_RATE=${BASE_RATE}%  NET_DELAY_MS=${NET_DELAY_MS}ms"
+echo "$(ts) BASE_RATE=${BASE_RATE}%  NET_DELAY_MS=${NET_DELAY_MS}ms  NET_LOSS_PCT=${NET_LOSS_PCT}%"
 if [[ "${USE_EXPLICIT_WINDOW}" -eq 1 ]]; then
   echo "$(ts) Plan: wait ${INJECT_AT}s → fault ${FAULT_SEC}s → tail ${TAIL_SEC}s (total ${TOTAL}s) [NET_INJECT/NET_RELEASE]"
 else
@@ -128,8 +133,12 @@ echo ""
 
 write_phase_header
 
-echo "$(ts) Step 0/4: clear any existing netem rules"
+echo "$(ts) Step 0/4: clear any existing netem rules (before base; idempotent x2)"
 bash "${SCRIPT_DIR}/net_delay_k8s.sh" clear || true
+sleep 2
+bash "${SCRIPT_DIR}/net_delay_k8s.sh" clear || true
+echo "$(ts) Step 0b: netem status on targets (expect clean before base)"
+bash "${SCRIPT_DIR}/net_delay_k8s.sh" status || true
 
 echo "$(ts) Step 1/4: start base load (RATE=${BASE_RATE}%)"
 append_phase_ts "BASE_LOAD_START"
@@ -139,8 +148,12 @@ echo "$(ts) Step 2/4: wait ${INJECT_AT}s then inject latency (${FAULT_SEC}s wind
 sleep "${INJECT_AT}"
 append_phase_ts "NET_DELAY_START"
 export NET_DELAY_MS
+export NET_LOSS_PCT
 # net_delay_k8s reads selector/namespace/direction/jitter/loss from env / .env
 bash "${SCRIPT_DIR}/net_delay_k8s.sh" set
+
+echo "$(ts) Step 2a: qdisc status after set (verify delay/loss on pod netns)"
+bash "${SCRIPT_DIR}/net_delay_k8s.sh" status || true
 
 echo "$(ts) Fault active for ${FAULT_SEC}s"
 sleep "${FAULT_SEC}"

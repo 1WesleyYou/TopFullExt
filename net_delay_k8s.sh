@@ -13,8 +13,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="${SCRIPT_DIR}/.env"
 
 # Caller exports (e.g. run_b_tune_fast.sh) must survive `source .env`, which often sets NET_* to 0.
-unset _CALL_NET_DELAY _CALL_INJECT _CALL_RELEASE
+unset _CALL_NET_DELAY _CALL_NET_JITTER _CALL_NET_LOSS _CALL_INJECT _CALL_RELEASE
 if [[ "${NET_DELAY_MS+isset}" == "isset" ]]; then _CALL_NET_DELAY="${NET_DELAY_MS}"; fi
+if [[ "${NET_JITTER_MS+isset}" == "isset" ]]; then _CALL_NET_JITTER="${NET_JITTER_MS}"; fi
+if [[ "${NET_LOSS_PCT+isset}" == "isset" ]]; then _CALL_NET_LOSS="${NET_LOSS_PCT}"; fi
 if [[ "${NET_INJECT_AT_SEC+isset}" == "isset" ]]; then _CALL_INJECT="${NET_INJECT_AT_SEC}"; fi
 if [[ "${NET_RELEASE_AT_SEC+isset}" == "isset" ]]; then _CALL_RELEASE="${NET_RELEASE_AT_SEC}"; fi
 
@@ -24,6 +26,8 @@ if [[ -f "${ENV_FILE}" ]]; then
 fi
 
 [[ "${_CALL_NET_DELAY+isset}" == "isset" ]] && NET_DELAY_MS="${_CALL_NET_DELAY}"
+[[ "${_CALL_NET_JITTER+isset}" == "isset" ]] && NET_JITTER_MS="${_CALL_NET_JITTER}"
+[[ "${_CALL_NET_LOSS+isset}" == "isset" ]] && NET_LOSS_PCT="${_CALL_NET_LOSS}"
 [[ "${_CALL_INJECT+isset}" == "isset" ]] && NET_INJECT_AT_SEC="${_CALL_INJECT}"
 [[ "${_CALL_RELEASE+isset}" == "isset" ]] && NET_RELEASE_AT_SEC="${_CALL_RELEASE}"
 
