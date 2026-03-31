@@ -1,171 +1,116 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Base load only (no surge overlay). Injects network latency with tcconfig at a chosen time.
+# Base load + timed network fault injection (delay / packet loss).
 #
-# Timeline (defaults mirror run_surge_experiment.sh phase lengths, without surge):
-#   t=0              base load starts (make inject-base)
-#   t=BASE_SETTLE    netem applied (NET_DELAY_MS on NET_TARGET_*)
-#   t=BASE_SETTLE+NET_FAULT_SEC   netem cleared
-#   t=...+TAIL_SEC   experiment ends, cleanup
+# Timeline:
+#   make stop && make start  (refresh proxy + metrics on master)
+#   t=0                      base load starts
+#   t=BASE_SETTLE            netem injected (delay + loss)
+#   t=BASE_SETTLE+FAULT_SEC  netem cleared
+#   t=...+TAIL_SEC           experiment ends
 #
-# Primary knobs:
-#   BASE_SETTLE       — seconds of base-only warmup before injecting latency (default 90)
-#   NET_DELAY_MS      — added latency in milliseconds (default 200)
-#   NET_LOSS_PCT      — packet loss percentage during fault window (default 0)
-#   NET_FAULT_SEC     — how long netem stays on after inject (default 120, like SURGE_SEC)
-#   TAIL_SEC          — post-fault tail with base load still running (default 120)
-#   BASE_RATE         — Locust scale %% (default 15)
-#
-# Override inject/release offsets explicitly (seconds from load start, monotonic):
-#   NET_INJECT_AT_SEC / NET_RELEASE_AT_SEC — if both set, NET_FAULT_SEC is ignored and we sleep
-#     (RELEASE - INJECT) between set and clear.
+# All knobs (override via env):
+#   BASE_RATE       load rate %                      (default 24)
+#   NET_DELAY_MS    added latency ms                 (default 0, loss-only)
+#   NET_LOSS_PCT    packet loss %                    (default 10)
+#   NET_DIRECTION   egress | ingress | both          (default both)
+#   BASE_SETTLE     warmup seconds before fault      (default 90)
+#   FAULT_SEC       fault duration seconds            (default 120)
+#   TAIL_SEC        post-fault observation seconds    (default 120)
+#   PHASE_LOG       path for phase_markers file
 #
 # Usage:
 #   ./run_base_netdelay_experiment.sh
-#   BASE_SETTLE=60 NET_DELAY_MS=250 NET_LOSS_PCT=0.5 NET_FAULT_SEC=90 TAIL_SEC=60 ./run_base_netdelay_experiment.sh
-#
-# Other NET_* (selector, direction, jitter, loss, namespace, iface) come from .env unless exported.
+#   NET_DELAY_MS=30 NET_LOSS_PCT=15 BASE_RATE=26 ./run_base_netdelay_experiment.sh
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ENV_FILE="${SCRIPT_DIR}/.env"
 
-unset _CALL_NET_DELAY _CALL_NET_LOSS _CALL_INJECT _CALL_RELEASE
-if [[ "${NET_DELAY_MS+isset}" == "isset" ]]; then _CALL_NET_DELAY="${NET_DELAY_MS}"; fi
-if [[ "${NET_LOSS_PCT+isset}" == "isset" ]]; then _CALL_NET_LOSS="${NET_LOSS_PCT}"; fi
-if [[ "${NET_INJECT_AT_SEC+isset}" == "isset" ]]; then _CALL_INJECT="${NET_INJECT_AT_SEC}"; fi
-if [[ "${NET_RELEASE_AT_SEC+isset}" == "isset" ]]; then _CALL_RELEASE="${NET_RELEASE_AT_SEC}"; fi
-
-if [[ -f "${ENV_FILE}" ]]; then
-  # shellcheck disable=SC1090
-  source "${ENV_FILE}"
-fi
-
-[[ "${_CALL_NET_DELAY+isset}" == "isset" ]] && NET_DELAY_MS="${_CALL_NET_DELAY}"
-[[ "${_CALL_NET_LOSS+isset}" == "isset" ]] && NET_LOSS_PCT="${_CALL_NET_LOSS}"
-[[ "${_CALL_INJECT+isset}" == "isset" ]] && NET_INJECT_AT_SEC="${_CALL_INJECT}"
-[[ "${_CALL_RELEASE+isset}" == "isset" ]] && NET_RELEASE_AT_SEC="${_CALL_RELEASE}"
-
-BASE_RATE="${BASE_RATE:-15}"
+BASE_RATE="${BASE_RATE:-24}"
+NET_DELAY_MS="${NET_DELAY_MS:-0}"
+NET_LOSS_PCT="${NET_LOSS_PCT:-10}"
+NET_DIRECTION="${NET_DIRECTION:-both}"
 BASE_SETTLE="${BASE_SETTLE:-90}"
-NET_FAULT_SEC="${NET_FAULT_SEC:-120}"
+FAULT_SEC="${FAULT_SEC:-120}"
 TAIL_SEC="${TAIL_SEC:-120}"
-METRIC_SAMPLE_SEC="${METRIC_SAMPLE_SEC:-1}"
 PHASE_LOG="${PHASE_LOG:-${SCRIPT_DIR}/phase_markers_base_netdelay.env}"
 
-# Latency magnitude: .env often has 0 meaning "off"; this experiment needs a positive delay.
-[[ -z "${NET_DELAY_MS:-}" || "${NET_DELAY_MS}" == "0" ]] && NET_DELAY_MS=200
-NET_LOSS_PCT="${NET_LOSS_PCT:-0}"
-
-USE_EXPLICIT_WINDOW=0
-if [[ -n "${NET_INJECT_AT_SEC:-}" && -n "${NET_RELEASE_AT_SEC:-}" && "${NET_RELEASE_AT_SEC}" != "0" ]]; then
-  if [[ "${NET_RELEASE_AT_SEC}" -le "${NET_INJECT_AT_SEC}" ]]; then
-    echo "ERROR: NET_RELEASE_AT_SEC (${NET_RELEASE_AT_SEC}) must be > NET_INJECT_AT_SEC (${NET_INJECT_AT_SEC})" >&2
-    exit 1
-  fi
-  USE_EXPLICIT_WINDOW=1
-  INJECT_AT="${NET_INJECT_AT_SEC}"
-  FAULT_SEC=$(( NET_RELEASE_AT_SEC - NET_INJECT_AT_SEC ))
-else
-  # Prefer explicit NET_INJECT_AT_SEC from caller; treat .env's 0 as unset → BASE_SETTLE.
-  if [[ "${_CALL_INJECT+isset}" == "isset" ]]; then
-    INJECT_AT="${NET_INJECT_AT_SEC}"
-  elif [[ -n "${NET_INJECT_AT_SEC:-}" && "${NET_INJECT_AT_SEC}" != "0" ]]; then
-    INJECT_AT="${NET_INJECT_AT_SEC}"
-  else
-    INJECT_AT="${BASE_SETTLE}"
-  fi
-  FAULT_SEC="${NET_FAULT_SEC}"
-fi
-
-TOTAL=$(( INJECT_AT + FAULT_SEC + TAIL_SEC ))
+TOTAL=$(( BASE_SETTLE + FAULT_SEC + TAIL_SEC ))
 
 ts() { printf "[%s]" "$(date +'%H:%M:%S')"; }
 
-write_phase_header() {
-  local t0 epoch0 iso0
-  iso0="$(date -Iseconds)"
-  epoch0="$(date -u +%s)"
-  {
-    echo "# Generated by run_base_netdelay_experiment.sh — base load + timed netem (no surge)"
-    echo "GENERATED_AT_ISO=${iso0}"
-    echo "TS_EXPERIMENT_START=${epoch0}"
-    echo "BASE_RATE=${BASE_RATE}"
-    echo "NET_DELAY_MS=${NET_DELAY_MS}"
-    echo "NET_LOSS_PCT=${NET_LOSS_PCT}"
-    echo "BASE_SETTLE=${BASE_SETTLE}"
-    echo "NET_FAULT_SEC=${NET_FAULT_SEC}"
-    echo "NET_INJECT_AT_SEC=${INJECT_AT}"
-    echo "NET_RELEASE_AT_SEC=$(( INJECT_AT + FAULT_SEC ))"
-    echo "TAIL_SEC=${TAIL_SEC}"
-    echo "METRIC_SAMPLE_SEC=${METRIC_SAMPLE_SEC}"
-    echo "FAULT_START_INDEX=$(( INJECT_AT / METRIC_SAMPLE_SEC ))"
-    echo "FAULT_END_INDEX=$(( (INJECT_AT + FAULT_SEC) / METRIC_SAMPLE_SEC ))"
-  } > "${PHASE_LOG}.tmp"
-  mv "${PHASE_LOG}.tmp" "${PHASE_LOG}"
-}
-
 append_phase_ts() {
-  local key="$1"
-  local iso epoch
-  iso="$(date -Iseconds)"
-  epoch="$(date -u +%s)"
-  printf "%s_ISO=%s\n" "${key}" "${iso}" >> "${PHASE_LOG}"
-  printf "%s_EPOCH=%s\n" "${key}" "${epoch}" >> "${PHASE_LOG}"
+  local key="$1" iso epoch
+  iso="$(date -Iseconds)"; epoch="$(date -u +%s)"
+  printf "%s_ISO=%s\n%s_EPOCH=%s\n" "${key}" "${iso}" "${key}" "${epoch}" >> "${PHASE_LOG}"
 }
 
 cleanup() {
-  echo "$(ts) Stopping load and clearing netem..."
+  echo "$(ts) Cleanup: clearing netem + stopping load..."
   bash "${SCRIPT_DIR}/net_delay_k8s.sh" clear 2>/dev/null || true
   make -C "${SCRIPT_DIR}" stop 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 
-echo "$(ts) === Base load + network delay (no surge) ==="
-echo "$(ts) BASE_RATE=${BASE_RATE}%  NET_DELAY_MS=${NET_DELAY_MS}ms  NET_LOSS_PCT=${NET_LOSS_PCT}%"
-if [[ "${USE_EXPLICIT_WINDOW}" -eq 1 ]]; then
-  echo "$(ts) Plan: wait ${INJECT_AT}s → fault ${FAULT_SEC}s → tail ${TAIL_SEC}s (total ${TOTAL}s) [NET_INJECT/NET_RELEASE]"
-else
-  echo "$(ts) Plan: wait ${INJECT_AT}s → fault ${FAULT_SEC}s → tail ${TAIL_SEC}s (total ${TOTAL}s)"
-fi
-echo "$(ts) Phase markers → ${PHASE_LOG}"
+# ---- Header ----
+echo "$(ts) === Netdelay Experiment ==="
+echo "$(ts) BASE_RATE=${BASE_RATE}%  NET_DELAY_MS=${NET_DELAY_MS}ms  NET_LOSS_PCT=${NET_LOSS_PCT}%  NET_DIRECTION=${NET_DIRECTION}"
+echo "$(ts) Timeline: base ${BASE_SETTLE}s -> fault ${FAULT_SEC}s -> tail ${TAIL_SEC}s (total ${TOTAL}s)"
 echo ""
 
-write_phase_header
+cat > "${PHASE_LOG}" <<EOF
+# Generated by run_base_netdelay_experiment.sh
+BASE_RATE=${BASE_RATE}
+NET_DELAY_MS=${NET_DELAY_MS}
+NET_LOSS_PCT=${NET_LOSS_PCT}
+NET_DIRECTION=${NET_DIRECTION}
+BASE_SETTLE=${BASE_SETTLE}
+FAULT_SEC=${FAULT_SEC}
+TAIL_SEC=${TAIL_SEC}
+EOF
 
-echo "$(ts) Step 0/4: clear any existing netem rules (before base; idempotent x2)"
+# ---- Step 0: stop/start + clear netem ----
+echo "$(ts) Step 0: make stop && make start"
+make -C "${SCRIPT_DIR}" stop 2>/dev/null || true
+make -C "${SCRIPT_DIR}" start
+sleep 5
+
+echo "$(ts) Step 0: clear netem"
 bash "${SCRIPT_DIR}/net_delay_k8s.sh" clear || true
 sleep 2
 bash "${SCRIPT_DIR}/net_delay_k8s.sh" clear || true
-echo "$(ts) Step 0b: netem status on targets (expect clean before base)"
 bash "${SCRIPT_DIR}/net_delay_k8s.sh" status || true
 
-echo "$(ts) Step 1/4: start base load (RATE=${BASE_RATE}%)"
+# ---- Step 1: base load ----
+echo "$(ts) Step 1: start base load (RATE=${BASE_RATE}%)"
 append_phase_ts "BASE_LOAD_START"
 make -C "${SCRIPT_DIR}" inject-base "RATE=${BASE_RATE}"
 
-echo "$(ts) Step 2/4: wait ${INJECT_AT}s then inject latency (${FAULT_SEC}s window)"
-sleep "${INJECT_AT}"
+# ---- Step 2: wait then inject fault ----
+echo "$(ts) Step 2: waiting ${BASE_SETTLE}s before fault injection..."
+sleep "${BASE_SETTLE}"
 append_phase_ts "NET_DELAY_START"
-export NET_DELAY_MS
-export NET_LOSS_PCT
-# net_delay_k8s reads selector/namespace/direction/jitter/loss from env / .env
-bash "${SCRIPT_DIR}/net_delay_k8s.sh" set
 
-echo "$(ts) Step 2a: qdisc status after set (verify delay/loss on pod netns)"
-bash "${SCRIPT_DIR}/net_delay_k8s.sh" status || true
+if [[ "${NET_DELAY_MS}" == "0" && "${NET_LOSS_PCT}" == "0" ]]; then
+  echo "$(ts) Step 2: delay=0 and loss=0 -> skipping netem (no-op fault window)"
+else
+  export NET_DELAY_MS NET_LOSS_PCT NET_DIRECTION
+  bash "${SCRIPT_DIR}/net_delay_k8s.sh" set
+  bash "${SCRIPT_DIR}/net_delay_k8s.sh" status || true
+fi
 
-echo "$(ts) Fault active for ${FAULT_SEC}s"
+echo "$(ts) Fault active for ${FAULT_SEC}s..."
 sleep "${FAULT_SEC}"
 
+# ---- Step 3: clear fault ----
 append_phase_ts "NET_DELAY_END"
+echo "$(ts) Step 3: clearing netem"
 bash "${SCRIPT_DIR}/net_delay_k8s.sh" clear
 
-echo ""
-echo "$(ts) Step 3/4: post-fault tail ${TAIL_SEC}s (base still running)"
+# ---- Step 4: tail observation ----
+echo "$(ts) Step 4: post-fault tail ${TAIL_SEC}s"
 append_phase_ts "TAIL_START"
 sleep "${TAIL_SEC}"
 
 append_phase_ts "EXPERIMENT_END"
-echo ""
-echo "$(ts) Step 4/4: complete. Cleanup runs via trap."
+echo "$(ts) Done."
