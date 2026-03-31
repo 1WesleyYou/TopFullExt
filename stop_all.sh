@@ -40,6 +40,12 @@ main() {
   echo "Stopping load injection (tmux + locust) on ${loadgen_target}..."
   ssh "${loadgen_target}" "for s in session1 session2 session3 session4 session5 session6 topfull-loadgen; do tmux kill-session -t \$s 2>/dev/null || true; done; pkill -f locust 2>/dev/null || true; echo '  done.'; exit 0" || true
 
+  echo "Clearing network fault rules on target pods..."
+  bash "${SCRIPT_DIR}/net_delay_k8s.sh" clear >/dev/null 2>&1 || true
+
+  echo "Removing base-netdelay phase markers..."
+  rm -f "${SCRIPT_DIR}/phase_markers_base_netdelay.env"
+
   echo "All injection and controller processes stopped."
 }
 
