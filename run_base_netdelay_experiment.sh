@@ -4,7 +4,7 @@ set -euo pipefail
 # Base load + timed network fault injection (delay / packet loss).
 #
 # Timeline:
-#   make stop && make start  (refresh proxy + metrics on master)
+#   (caller starts desired stack: make start / make rl / make mimd / etc.)
 #   t=0                      base load starts
 #   t=BASE_SETTLE            netem injected (delay + loss)
 #   t=BASE_SETTLE+FAULT_SEC  netem cleared
@@ -50,11 +50,10 @@ append_phase_ts() {
 }
 
 cleanup() {
-  echo "$(ts) Cleanup: clearing netem + stopping load..."
+  echo "$(ts) Cleanup: clearing netem..."
   if [[ "${NETEM_CLEARED}" != "1" ]]; then
     bash "${SCRIPT_DIR}/net_delay_k8s.sh" clear 2>/dev/null || true
   fi
-  make -C "${SCRIPT_DIR}" stop 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 
@@ -76,16 +75,8 @@ FAULT_SEC=${FAULT_SEC}
 TAIL_SEC=${TAIL_SEC}
 EOF
 
-# ---- Step 0: pre-clear netem -> stop/start -> post-clear netem ----
-echo "$(ts) Step 0a: pre-clear netem before make stop/start"
-bash "${SCRIPT_DIR}/net_delay_k8s.sh" clear || true
-
-echo "$(ts) Step 0b: make stop && make start"
-make -C "${SCRIPT_DIR}" stop 2>/dev/null || true
-make -C "${SCRIPT_DIR}" start
-sleep 5
-
-echo "$(ts) Step 0c: post-clear netem on refreshed pods"
+# ---- Step 0: pre-clear netem ----
+echo "$(ts) Step 0: pre-clear netem"
 bash "${SCRIPT_DIR}/net_delay_k8s.sh" clear || true
 
 # ---- Step 1: base load ----
