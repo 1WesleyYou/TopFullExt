@@ -1,6 +1,7 @@
 from fetch_istio import *
 from admission_controller import kubeAPI
 from resource_collector import *
+from metric_collector import Collector
 
 import json
 import logging
@@ -193,9 +194,11 @@ class Detector:
 
     Return: List of overloaded service
     """
-    def detect(self, alpha=0.9):
-        # Fetch CPU quota and CPU usage of all services
-        result = []
+    def detect(self, alpha=0.9, fail_ratio_threshold=None):
+        cpu_overloaded = []
+        net_degraded = []
+
+        # Signal 1: CPU overload (original)
         resources = self.get_cpu_util_v2(list(self.services.keys()))
         print(resources)
         for svc in list(resources.keys()):
@@ -206,8 +209,42 @@ class Detector:
             else:
                 target = alpha
             if usage > quota * target:
-                result.append(svc)
-        print(result)
+                cpu_overloaded.append(svc)
+
+        # Signal 2 (opt-in): high fail ratio per API → mark services on path
+        self._last_fail_ratios = {}
+        if fail_ratio_threshold is not None:
+            try:
+                _c = Collector(code=global_config["microservice_code"])
+                metrics = _c.query()
+                for api_name, api_info in self.apis.items():
+                    vals = metrics.get(api_name)
+                    if vals is None:
+                        continue
+                    rps, fail = float(vals[0]), float(vals[1])
+                    fr = fail / rps if rps > 1.0 else 0.0
+                    self._last_fail_ratios[api_name] = fr
+                    if rps > 1.0 and fr > fail_ratio_threshold:
+                        for svc in api_info['execution_path']:
+                            if svc not in net_degraded:
+                                net_degraded.append(svc)
+            except Exception as e:
+                print(f"[detect] fail-ratio probe error: {e}")
+
+        # Classify fault type
+        has_cpu = len(cpu_overloaded) > 0
+        has_net = len(net_degraded) > 0
+        if has_cpu and has_net:
+            self.last_fault_type = "both"
+        elif has_cpu:
+            self.last_fault_type = "cpu"
+        elif has_net:
+            self.last_fault_type = "network"
+        else:
+            self.last_fault_type = "none"
+
+        result = list(set(cpu_overloaded + net_degraded))
+        print(f"[detect] fault_type={self.last_fault_type}  services={result}")
         return result
     
     """

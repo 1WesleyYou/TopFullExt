@@ -1,9 +1,10 @@
-.PHONY: help mimd rl heuristic train cadvisor inject inject-base inject-surge baseline observe status stop start-no-ctrl pack check-mimd net-delay-set net-delay-clear net-delay-run net-delay-status
+.PHONY: help mimd rl rl2 heuristic train cadvisor inject inject-base inject-surge baseline observe status stop start-no-ctrl pack check-mimd net-delay-set net-delay-clear net-delay-run net-delay-status
 
 help:
 	@echo "TopFull quick commands:"
 	@echo "  make mimd           - one-click MIMD start (auto ensure cAdvisor, then proxy + controller + metrics)"
-	@echo "  make rl             - one-click RL start (auto ensure cAdvisor, then proxy + controller + metrics)"
+	@echo "  make rl             - one-click RL start (original CPU-only detection)"
+	@echo "  make rl2            - one-click RL2 start (RL + per-API network fault compensation)"
 	@echo "  make heuristic      - one-click heuristic start (proxy + controller + metrics)"
 	@echo "  make train          - start online RL training (proxy + metrics + transfer_learning, no injection)"
 	@echo "  make cadvisor       - ensure/redeploy cAdvisor on master and wait until ready"
@@ -29,6 +30,9 @@ mimd:
 
 rl:
 	@bash ./run_rl_stack.sh
+
+rl2:
+	@bash ./run_rl2_stack.sh
 
 heuristic:
 	@bash ./run_heuristic_stack.sh
