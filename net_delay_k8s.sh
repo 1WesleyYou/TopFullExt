@@ -17,6 +17,7 @@ set -euo pipefail
 #   NET_DIRECTION         egress|ingress|both (default: both)
 #   NET_NAMESPACE         k8s namespace     (default: default)
 #   NET_IFACE             pod interface     (default: eth0)
+#   NET_TARGET_POD_COUNT  truncate resolved pod list to first N (default: 0 = all)
 #   MASTER_NODE           master host       (default: node0)
 #   SSH_USER              ssh user prefix   (default: empty)
 
@@ -27,13 +28,15 @@ ENV_FILE="${SCRIPT_DIR}/.env"
 # Caller-exported NET_DELAY_MS / NET_LOSS_PCT / NET_DIRECTION always win.
 _save_delay="${NET_DELAY_MS:-}"; _save_jitter="${NET_JITTER_MS:-}"
 _save_loss="${NET_LOSS_PCT:-}"; _save_dir="${NET_DIRECTION:-}"
+_save_count="${NET_TARGET_POD_COUNT:-}"
 if [[ -f "${ENV_FILE}" ]]; then
   # shellcheck disable=SC1090
   source "${ENV_FILE}"
 fi
 NET_DELAY_MS="${_save_delay}"; NET_JITTER_MS="${_save_jitter}"
 NET_LOSS_PCT="${_save_loss}"; NET_DIRECTION="${_save_dir}"
-unset _save_delay _save_jitter _save_loss _save_dir
+NET_TARGET_POD_COUNT="${_save_count}"
+unset _save_delay _save_jitter _save_loss _save_dir _save_count
 
 ACTION="${1:-status}"
 shift || true
@@ -48,6 +51,7 @@ NET_LOSS_PCT="${NET_LOSS_PCT:-0}"
 NET_DIRECTION="${NET_DIRECTION:-both}"
 NET_NAMESPACE="${NET_NAMESPACE:-default}"
 NET_IFACE="${NET_IFACE:-eth0}"
+NET_TARGET_POD_COUNT="${NET_TARGET_POD_COUNT:-0}"   # 0 = inject all matching pods; N>0 = take first N
 
 target_host() {
   if [[ -n "${SSH_USER}" ]]; then printf "%s@%s" "${SSH_USER}" "$1"; else printf "%s" "$1"; fi
@@ -73,6 +77,15 @@ resolve_pods() {
     echo "ERROR: set NET_TARGET_SELECTOR or NET_TARGET_PODS" >&2; exit 1
   fi
   [[ -z "${pods}" ]] && { echo "ERROR: no pods matched" >&2; exit 1; }
+  # Optional subset: when NET_TARGET_POD_COUNT > 0, truncate to first N (stable kubectl order).
+  if [[ "${NET_TARGET_POD_COUNT}" -gt 0 ]]; then
+    # shellcheck disable=SC2206
+    local arr=( ${pods} )
+    local total="${#arr[@]}"
+    if [[ "${NET_TARGET_POD_COUNT}" -lt "${total}" ]]; then
+      pods="${arr[*]:0:${NET_TARGET_POD_COUNT}}"
+    fi
+  fi
   echo "${pods}"
 }
 

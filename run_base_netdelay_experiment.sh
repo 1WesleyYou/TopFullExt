@@ -19,12 +19,14 @@ set -euo pipefail
 #   FAULT_SEC       fault duration seconds            (default 120)
 #   TAIL_SEC        post-fault observation seconds    (default 120)
 #   SURGE_RATE      surge overlay during fault (0=off) (default 0)
+#   POD_COUNT       inject into first N matched pods  (default 0 = all)
 #   PHASE_LOG       path for phase_markers file
 #
 # Usage:
 #   ./run_base_netdelay_experiment.sh
 #   NET_DELAY_MS=30 NET_LOSS_PCT=15 BASE_RATE=26 ./run_base_netdelay_experiment.sh
 #   SURGE_RATE=160 NET_LOSS_PCT=14 ./run_base_netdelay_experiment.sh
+#   POD_COUNT=2 BASE_RATE=24 NET_LOSS_PCT=10 NET_DIRECTION=both ./run_base_netdelay_experiment.sh
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -36,8 +38,12 @@ NET_DIRECTION="${NET_DIRECTION:-egress}"
 BASE_SETTLE="${BASE_SETTLE:-90}"
 FAULT_SEC="${FAULT_SEC:-120}"
 TAIL_SEC="${TAIL_SEC:-120}"
+POD_COUNT="${POD_COUNT:-0}"
 PHASE_LOG="${PHASE_LOG:-${SCRIPT_DIR}/phase_markers_base_netdelay.env}"
 NETEM_CLEARED=0
+
+# Propagate subset knob to net_delay_k8s.sh (honored by set/clear/status).
+export NET_TARGET_POD_COUNT="${POD_COUNT}"
 
 TOTAL=$(( BASE_SETTLE + FAULT_SEC + TAIL_SEC ))
 
@@ -59,7 +65,7 @@ trap cleanup EXIT INT TERM
 
 # ---- Header ----
 echo "$(ts) === Netdelay Experiment ==="
-echo "$(ts) BASE_RATE=${BASE_RATE}%  SURGE_RATE=${SURGE_RATE}%  NET_DELAY_MS=${NET_DELAY_MS}ms  NET_LOSS_PCT=${NET_LOSS_PCT}%  NET_DIRECTION=${NET_DIRECTION}"
+echo "$(ts) BASE_RATE=${BASE_RATE}%  SURGE_RATE=${SURGE_RATE}%  NET_DELAY_MS=${NET_DELAY_MS}ms  NET_LOSS_PCT=${NET_LOSS_PCT}%  NET_DIRECTION=${NET_DIRECTION}  POD_COUNT=${POD_COUNT} (0=all)"
 echo "$(ts) Timeline: base ${BASE_SETTLE}s -> fault ${FAULT_SEC}s -> tail ${TAIL_SEC}s (total ${TOTAL}s)"
 echo ""
 
@@ -73,6 +79,7 @@ NET_DIRECTION=${NET_DIRECTION}
 BASE_SETTLE=${BASE_SETTLE}
 FAULT_SEC=${FAULT_SEC}
 TAIL_SEC=${TAIL_SEC}
+POD_COUNT=${POD_COUNT}
 EOF
 
 # ---- Step 0: pre-clear netem ----
