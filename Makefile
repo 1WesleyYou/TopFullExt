@@ -1,4 +1,4 @@
-.PHONY: help mimd rl rl2 heuristic train cadvisor inject inject-base inject-surge baseline observe status stop start-no-ctrl pack check-mimd net-delay-set net-delay-clear net-delay-run net-delay-status
+.PHONY: help mimd rl rl2 heuristic train cadvisor inject inject-base inject-surge baseline observe status stop start-no-ctrl pack check-mimd net-delay-set net-delay-clear net-delay-run net-delay-status steering-detect steering-steer steering-restore steering-status
 
 help:
 	@echo "TopFull quick commands:"
@@ -24,6 +24,12 @@ help:
 	@echo "  make net-delay-clear   - remove network delay from target pods"
 	@echo "  make net-delay-run     - timed inject + release (uses NET_INJECT_AT_SEC / NET_RELEASE_AT_SEC)"
 	@echo "  make net-delay-status  - show netem qdisc on target pods"
+	@echo ""
+	@echo "Pod health steering:"
+	@echo "  make steering-detect   - probe health of productcatalogservice pods"
+	@echo "  make steering-steer    - remove faulty pods from endpoints + flush conntrack"
+	@echo "  make steering-restore  - re-add all steered pods to endpoints"
+	@echo "  make steering-status   - show endpoint membership + steering state"
 
 mimd:
 	@./run_mimd_stack.sh
@@ -84,3 +90,15 @@ net-delay-run:
 
 net-delay-status:
 	@bash ./net_delay_k8s.sh status
+
+steering-detect:
+	@bash ./pod_health_steering.sh detect
+
+steering-steer:
+	@bash ./pod_health_steering.sh steer
+
+steering-restore:
+	@bash ./pod_health_steering.sh restore
+
+steering-status:
+	@bash ./pod_health_steering.sh status
