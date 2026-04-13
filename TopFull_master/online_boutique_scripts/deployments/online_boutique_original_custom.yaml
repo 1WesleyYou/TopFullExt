@@ -237,8 +237,9 @@ spec:
       #   kubernetes.io/hostname: banana2
       containers:
         - name: server
-          imagePullPolicy: Always
-          image: qkrwogud676/onlineboutique_frontend:v0.0.2
+          imagePullPolicy: Never
+          image: onlineboutique_frontend:roundrobin
+          # image: qkrwogud676/onlineboutique_frontend:v0.0.2
           # image: qkrwogud676/onlineboutique_frontend:v0.0.1
           # image: gcr.io/google-samples/microservices-demo/frontend:v0.3.8
           ports:
@@ -439,6 +440,7 @@ metadata:
   name: productcatalogservice
 spec:
   type: ClusterIP
+  clusterIP: None
   selector:
     app: productcatalogservice
   ports:
