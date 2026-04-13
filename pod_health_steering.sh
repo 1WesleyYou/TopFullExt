@@ -364,33 +364,8 @@ do_monitor() {
     # ---- Detect + steer faulty pods (resilient to transient errors) ----
     do_steer 2>&1 | while IFS= read -r line; do echo "$(ts) ${line}"; done || true
 
-    # ---- Auto-restore: check if previously steered pods are now healthy ----
-    if [[ -s "${STEERED_FILE}" ]]; then
-      local all_pods
-      all_pods="$(resolve_all_pods 2>/dev/null)" || true
-
-      local probe_source=""
-      # Use a known-healthy pod from the healthy file.
-      if [[ -s /tmp/steering_healthy.txt ]]; then
-        probe_source="$(head -1 /tmp/steering_healthy.txt | awk '{print $1}')"
-      fi
-
-      if [[ -n "${probe_source}" ]]; then
-        local new_steered=""
-        while IFS=' ' read -r pod_name pod_ip; do
-          [[ -z "${pod_name}" ]] && continue
-          if probe_health "${probe_source}" "${pod_ip}" 2>/dev/null; then
-            log "AUTO-RESTORE: ${pod_name} (${pod_ip}) is healthy again"
-            ssh_s "${MASTER_TARGET}" \
-              "kubectl label pod '${pod_name}' -n '${NET_NAMESPACE}' app=productcatalogservice --overwrite 2>/dev/null" || true
-            echo "$(date -Iseconds) AUTO-RESTORE ${pod_name} ${pod_ip}" >> "${STEERING_LOG}"
-          else
-            new_steered+="${pod_name} ${pod_ip}\n"
-          fi
-        done < "${STEERED_FILE}"
-        printf "%b" "${new_steered}" | grep -v '^$' > "${STEERED_FILE}" 2>/dev/null || true
-      fi
-    fi
+    # No auto-restore during monitor — steered pods stay out of endpoints
+    # until explicitly restored (prevents flapping with probabilistic faults).
 
     sleep "${STEERING_INTERVAL}"
   done
