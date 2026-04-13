@@ -291,14 +291,19 @@ do_steer() {
     log "STEER [2/3]: waiting for replacement pod to be Ready..."
     wait_endpoints_ready "${current_endpoints}" 30 || true
 
-    # Step 3: NOW flush conntrack for this specific pod (safe — replacement is serving).
-    for node in ${STEERING_CONNTRACK_NODES}; do
-      ssh_s "$(target_host "${node}")" \
-        "sudo /usr/sbin/conntrack -D -d '${pod_ip}' -p tcp --dport '${STEERING_SERVICE_PORT}' 2>/dev/null || true" >/dev/null 2>&1 || true
-    done
-    log "STEER [3/3]: flushed conntrack for ${pod_ip} — steering done for ${pod_name}"
+    log "STEER [3/3]: label removed + replacement ready for ${pod_name}"
 
   done < "${faulty_file}"
+
+  # Step 4: Flush ALL conntrack entries for the service port across all nodes.
+  # This forces ALL frontend gRPC connections to reconnect through the VIP,
+  # distributing evenly across all healthy pods (original + replacements).
+  log "STEER [FLUSH]: flushing ALL conntrack dport=${STEERING_SERVICE_PORT} on all nodes..."
+  for node in ${STEERING_CONNTRACK_NODES}; do
+    ssh_s "$(target_host "${node}")" \
+      "sudo /usr/sbin/conntrack -D -p tcp --dport '${STEERING_SERVICE_PORT}' 2>/dev/null || true" >/dev/null 2>&1 || true
+  done
+  log "STEER [FLUSH]: done — all frontend connections will redistribute"
 
   log "Steering complete."
 }
