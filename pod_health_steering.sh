@@ -277,33 +277,34 @@ do_steer() {
       break
     fi
 
-    # ---- GRADUAL STEERING: one pod at a time ----
+    # ---- TARGETED STEERING: iptables REJECT in FORWARD chain ----
+    #
+    # Calico CNI routes pod-to-pod traffic through the FORWARD chain (not
+    # PREROUTING). DNAT in PREROUTING doesn't match pod traffic at all.
+    # Instead, we REJECT in FORWARD chain with tcp-reset. This causes:
+    #   1. All packets to the faulty pod IP get TCP RST immediately
+    #   2. gRPC subchannel enters TRANSIENT_FAILURE state
+    #   3. round-robin skips it, traffic goes to healthy subchannels only
+    #   4. Healthy connections are completely unaffected
+    #
+    # We also flush conntrack for just this IP to break existing connections
+    # so the REJECT rule takes effect on the next SYN.
 
-    # Step 1: Remove app label → K8s will create a replacement pod.
-    log "STEER [1/3]: removing ${pod_name} (${pod_ip}) label..."
-    ssh_s "${MASTER_TARGET}" "kubectl label pod '${pod_name}' -n '${NET_NAMESPACE}' app- 2>/dev/null" || true
+    log "STEER [1/2]: REJECT ${pod_name} (${pod_ip}) in FORWARD chain + flush conntrack on all nodes..."
+    for node in ${STEERING_CONNTRACK_NODES}; do
+      ssh_s "$(target_host "${node}")" \
+        "sudo iptables -I FORWARD -d '${pod_ip}' -p tcp --dport '${STEERING_SERVICE_PORT}' -j REJECT --reject-with tcp-reset 2>/dev/null || true" \
+        >/dev/null 2>&1 || true
+      ssh_s "$(target_host "${node}")" \
+        "sudo /usr/sbin/conntrack -D -p tcp -d '${pod_ip}' --dport '${STEERING_SERVICE_PORT}' 2>/dev/null || true" \
+        >/dev/null 2>&1 || true
+    done
     echo "${pod_name} ${pod_ip}" >> "${STEERED_FILE}"
-    echo "$(date -Iseconds) STEER ${pod_name} ${pod_ip}" >> "${STEERING_LOG}"
+    echo "$(date -Iseconds) STEER-REJECT ${pod_name} ${pod_ip}" >> "${STEERING_LOG}"
 
-    # Step 2: Wait for K8s to create replacement and become Ready.
-    # After label removal, RS creates a new pod. Wait until endpoint count
-    # is back to at least current_endpoints (meaning replacement is serving).
-    log "STEER [2/3]: waiting for replacement pod to be Ready..."
-    wait_endpoints_ready "${current_endpoints}" 30 || true
-
-    log "STEER [3/3]: label removed + replacement ready for ${pod_name}"
+    log "STEER [2/2]: FORWARD REJECT active for ${pod_ip} — gRPC subchannel will fail over immediately"
 
   done < "${faulty_file}"
-
-  # Step 4: Flush ALL conntrack entries for the service port across all nodes.
-  # This forces ALL frontend gRPC connections to reconnect through the VIP,
-  # distributing evenly across all healthy pods (original + replacements).
-  log "STEER [FLUSH]: flushing ALL conntrack dport=${STEERING_SERVICE_PORT} on all nodes..."
-  for node in ${STEERING_CONNTRACK_NODES}; do
-    ssh_s "$(target_host "${node}")" \
-      "sudo /usr/sbin/conntrack -D -p tcp --dport '${STEERING_SERVICE_PORT}' 2>/dev/null || true" >/dev/null 2>&1 || true
-  done
-  log "STEER [FLUSH]: done — all frontend connections will redistribute"
 
   log "Steering complete."
 }
@@ -314,12 +315,15 @@ do_restore() {
     return 0
   fi
 
-  log "Restoring all steered pods..."
-  while IFS=' ' read -r pod_name pod_ip; do
+  log "Restoring all steered pods (removing iptables REJECT rules)..."
+  while IFS=' ' read -r pod_name pod_ip _rest; do
     [[ -z "${pod_name}" ]] && continue
-    ssh_s "${MASTER_TARGET}" \
-      "kubectl label pod '${pod_name}' -n '${NET_NAMESPACE}' app=productcatalogservice --overwrite 2>/dev/null" || true
-    log "  restored ${pod_name} (${pod_ip})"
+    for node in ${STEERING_CONNTRACK_NODES}; do
+      ssh_s "$(target_host "${node}")" \
+        "sudo iptables -D FORWARD -d '${pod_ip}' -p tcp --dport '${STEERING_SERVICE_PORT}' -j REJECT --reject-with tcp-reset 2>/dev/null || true" \
+        >/dev/null 2>&1 || true
+    done
+    log "  restored ${pod_name} (${pod_ip}) — FORWARD REJECT removed"
     echo "$(date -Iseconds) RESTORE ${pod_name} ${pod_ip}" >> "${STEERING_LOG}"
   done < "${STEERED_FILE}"
 
