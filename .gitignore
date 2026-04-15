@@ -1,3 +1,11 @@
 *.png
 *.csv
 results/*
+# Transient experiment artifacts
+force_steer_events.log
+staggered_steer_events.log
+steering_events.log
+phase_markers.env
+phase_markers_base_netdelay.env
+TopFull_loadgen/__pycache__/
+TopFull_loadgen/req_stat.log

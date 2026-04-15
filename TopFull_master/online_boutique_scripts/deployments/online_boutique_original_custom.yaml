@@ -237,8 +237,9 @@ spec:
       #   kubernetes.io/hostname: banana2
       containers:
         - name: server
-          imagePullPolicy: Never
-          image: onlineboutique_frontend:roundrobin
+          imagePullPolicy: IfNotPresent
+          image: 1wesleyyou/onlineboutique_frontend:roundrobin
+          # image: onlineboutique_frontend:roundrobin
           # image: qkrwogud676/onlineboutique_frontend:v0.0.2
           # image: qkrwogud676/onlineboutique_frontend:v0.0.1
           # image: gcr.io/google-samples/microservices-demo/frontend:v0.3.8
